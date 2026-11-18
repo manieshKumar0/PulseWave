@@ -1,0 +1,284 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Public social listener profile and Sonic DNA vector (no PII).",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "displayName": { "type": "string" },
+        "handle": { "type": "string" },
+        "avatarUrl": { "type": "string" },
+        "bio": { "type": "string" },
+        "discoverable": { "type": "boolean" },
+        "topGenres": { "type": "array" },
+        "sonicEnergy": { "type": "integer" },
+        "sonicValence": { "type": "integer" },
+        "sonicTempo": { "type": "integer" },
+        "sonicAcoustic": { "type": "integer" },
+        "sonicElectronic": { "type": "integer" },
+        "sonicChill": { "type": "integer" },
+        "listeningMinutes": { "type": "integer" },
+        "streakDays": { "type": "integer" },
+        "nowPlayingTitle": { "type": "string" },
+        "nowPlayingArtist": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "displayName", "handle", "discoverable", "topGenres", "listeningMinutes", "streakDays", "createdAt", "updatedAt"]
+    },
+    "SyncedTrack": {
+      "title": "SyncedTrack",
+      "description": "User's private cloud-synced favorite/resume track metadata.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "trackId": { "type": "string" },
+        "title": { "type": "string" },
+        "artist": { "type": "string" },
+        "album": { "type": "string" },
+        "genre": { "type": "string" },
+        "mood": { "type": "string" },
+        "bpm": { "type": "integer" },
+        "durationMs": { "type": "integer" },
+        "artworkUrl": { "type": "string" },
+        "streamUrl": { "type": "string" },
+        "sourceType": { "type": "string" },
+        "liked": { "type": "boolean" },
+        "playCount": { "type": "integer" },
+        "lastPositionMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "trackId", "title", "artist", "sourceType", "liked", "playCount", "lastPositionMs", "createdAt", "updatedAt"]
+    },
+    "FriendRequest": {
+      "title": "FriendRequest",
+      "description": "Friend request or accepted connection between two listeners.",
+      "type": "object",
+      "properties": {
+        "fromUid": { "type": "string" },
+        "fromName": { "type": "string" },
+        "fromHandle": { "type": "string" },
+        "toUid": { "type": "string" },
+        "toName": { "type": "string" },
+        "toHandle": { "type": "string" },
+        "participantUids": { "type": "array" },
+        "status": { "type": "string", "enum": ["PENDING", "ACCEPTED"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["fromUid", "fromName", "fromHandle", "toUid", "toName", "toHandle", "participantUids", "status", "createdAt", "updatedAt"]
+    },
+    "FeedPost": {
+      "title": "FeedPost",
+      "description": "Instagram-style social music feed post sharing a track, lyric card, playlist, or soundscape.",
+      "type": "object",
+      "properties": {
+        "authorUid": { "type": "string" },
+        "authorName": { "type": "string" },
+        "authorHandle": { "type": "string" },
+        "visibility": { "type": "string", "enum": ["PUBLIC", "PRIVATE"] },
+        "postType": { "type": "string", "enum": ["TRACK", "LYRIC_CARD", "PLAYLIST", "SOUNDSCAPE"] },
+        "trackId": { "type": "string" },
+        "trackTitle": { "type": "string" },
+        "artist": { "type": "string" },
+        "artworkUrl": { "type": "string" },
+        "streamUrl": { "type": "string" },
+        "caption": { "type": "string" },
+        "lyricQuote": { "type": "string" },
+        "soundscapeLabel": { "type": "string" },
+        "likeUids": { "type": "array" },
+        "commentCount": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["authorUid", "authorName", "authorHandle", "visibility", "postType", "trackId", "trackTitle", "artist", "caption", "likeUids", "commentCount", "createdAt", "updatedAt"]
+    },
+    "FeedComment": {
+      "title": "FeedComment",
+      "description": "Comment on a social feed post.",
+      "type": "object",
+      "properties": {
+        "postId": { "type": "string" },
+        "postVisibility": { "type": "string" },
+        "authorUid": { "type": "string" },
+        "authorName": { "type": "string" },
+        "text": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["postId", "postVisibility", "authorUid", "authorName", "text", "createdAt"]
+    },
+    "Conversation": {
+      "title": "Conversation",
+      "description": "1:1 Direct Message thread between two friends.",
+      "type": "object",
+      "properties": {
+        "participantUids": { "type": "array" },
+        "participantLabel": { "type": "string" },
+        "lastMessageText": { "type": "string" },
+        "lastSenderUid": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["participantUids", "participantLabel", "lastMessageText", "lastSenderUid", "createdAt", "updatedAt"]
+    },
+    "DirectMessage": {
+      "title": "DirectMessage",
+      "description": "Direct message supporting inline playable track, playlist, soundscape, or lyric card attachments.",
+      "type": "object",
+      "properties": {
+        "senderUid": { "type": "string" },
+        "senderName": { "type": "string" },
+        "participantUids": { "type": "array" },
+        "text": { "type": "string" },
+        "attachmentType": { "type": "string", "enum": ["NONE", "TRACK", "PLAYLIST", "SOUNDSCAPE", "LYRIC"] },
+        "attachedId": { "type": "string" },
+        "attachedTitle": { "type": "string" },
+        "attachedSubtitle": { "type": "string" },
+        "attachedArtworkUrl": { "type": "string" },
+        "attachedStreamUrl": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["senderUid", "senderName", "participantUids", "text", "attachmentType", "createdAt"]
+    },
+    "CollaborativePlaylist": {
+      "title": "CollaborativePlaylist",
+      "description": "Real-time shared playlist with collaborator permissions and track upvotes.",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string" },
+        "ownerName": { "type": "string" },
+        "collaboratorUids": { "type": "array" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "collaborative": { "type": "boolean" },
+        "discoverable": { "type": "boolean" },
+        "trackItems": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "ownerName", "collaboratorUids", "title", "description", "collaborative", "discoverable", "trackItems", "createdAt", "updatedAt"]
+    },
+    "PulseRoom": {
+      "title": "PulseRoom",
+      "description": "Live synchronized co-listening room with shared queue and soundscape state.",
+      "type": "object",
+      "properties": {
+        "hostUid": { "type": "string" },
+        "hostName": { "type": "string" },
+        "roomName": { "type": "string" },
+        "moodTag": { "type": "string" },
+        "active": { "type": "boolean" },
+        "memberUids": { "type": "array" },
+        "currentTrackId": { "type": "string" },
+        "trackTitle": { "type": "string" },
+        "artist": { "type": "string" },
+        "artworkUrl": { "type": "string" },
+        "streamUrl": { "type": "string" },
+        "playing": { "type": "boolean" },
+        "positionMs": { "type": "integer" },
+        "soundscapePreset": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["hostUid", "hostName", "roomName", "moodTag", "active", "memberUids", "currentTrackId", "trackTitle", "artist", "playing", "positionMs", "soundscapePreset", "createdAt", "updatedAt"]
+    },
+    "RoomQueueItem": {
+      "title": "RoomQueueItem",
+      "description": "Track queued inside a live PulseRoom.",
+      "type": "object",
+      "properties": {
+        "roomActive": { "type": "boolean" },
+        "trackId": { "type": "string" },
+        "title": { "type": "string" },
+        "artist": { "type": "string" },
+        "artworkUrl": { "type": "string" },
+        "streamUrl": { "type": "string" },
+        "addedByUid": { "type": "string" },
+        "addedByName": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["roomActive", "trackId", "title", "artist", "addedByUid", "addedByName", "createdAt"]
+    },
+    "RoomReaction": {
+      "title": "RoomReaction",
+      "description": "Live soundwave/emoji reaction inside a PulseRoom.",
+      "type": "object",
+      "properties": {
+        "roomActive": { "type": "boolean" },
+        "senderUid": { "type": "string" },
+        "senderName": { "type": "string" },
+        "emoji": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["roomActive", "senderUid", "senderName", "emoji", "createdAt"]
+    },
+    "LyricNote": {
+      "title": "LyricNote",
+      "description": "Timestamp-pinned friend annotation on Beat-Reactive Lyric Canvas.",
+      "type": "object",
+      "properties": {
+        "trackKey": { "type": "string" },
+        "authorUid": { "type": "string" },
+        "authorName": { "type": "string" },
+        "timestampMs": { "type": "integer" },
+        "noteText": { "type": "string" },
+        "shared": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["trackKey", "authorUid", "authorName", "timestampMs", "noteText", "shared", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Listener profiles and Sonic DNA taste axes"
+    },
+    "/users/{userId}/syncedLibrary/{trackKey}": {
+      "schema": { "$ref": "#/entities/SyncedTrack" },
+      "description": "Private user library sync, likes, and playback resume state"
+    },
+    "/friendRequests/{requestId}": {
+      "schema": { "$ref": "#/entities/FriendRequest" },
+      "description": "Friendships and pending requests"
+    },
+    "/feedPosts/{postId}": {
+      "schema": { "$ref": "#/entities/FeedPost" },
+      "description": "Social music feed posts"
+    },
+    "/feedPosts/{postId}/comments/{commentId}": {
+      "schema": { "$ref": "#/entities/FeedComment" },
+      "description": "Comments on social music feed posts"
+    },
+    "/conversations/{conversationId}": {
+      "schema": { "$ref": "#/entities/Conversation" },
+      "description": "1:1 Direct Message conversations"
+    },
+    "/conversations/{conversationId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/DirectMessage" },
+      "description": "Direct messages with playable music attachments"
+    },
+    "/playlists/{playlistId}": {
+      "schema": { "$ref": "#/entities/CollaborativePlaylist" },
+      "description": "Real-time collaborative playlists"
+    },
+    "/pulseRooms/{roomId}": {
+      "schema": { "$ref": "#/entities/PulseRoom" },
+      "description": "Live co-listening rooms"
+    },
+    "/pulseRooms/{roomId}/queue/{queueId}": {
+      "schema": { "$ref": "#/entities/RoomQueueItem" },
+      "description": "Shared queue inside a live PulseRoom"
+    },
+    "/pulseRooms/{roomId}/reactions/{reactionId}": {
+      "schema": { "$ref": "#/entities/RoomReaction" },
+      "description": "Live reactions inside a PulseRoom"
+    },
+    "/lyricNotes/{noteId}": {
+      "schema": { "$ref": "#/entities/LyricNote" },
+      "description": "Timestamped friend lyric annotations"
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "PulseWave",
+  "description": "Social AI music player with live soundscape morphing, beat-reactive synced lyrics, Sonic DNA taste blending, offline downloads, and live collaborative PulseRooms.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

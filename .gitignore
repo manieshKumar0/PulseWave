@@ -1,0 +1,36 @@
+# Gradle & Kotlin
+*.iml
+.gradle/
+.kotlin/
+build/
+/build
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# IDE & OS
+/.idea/
+.DS_Store
+Thumbs.db
+
+# Local & Secrets
+local.properties
+/local.properties
+.env
+.env.local
+
+# Build Outputs & Signing
+.build-outputs/
+*.apk
+*.ap_
+*.aab
+*.dex
+*.jks
+debug.keystore
+*-debug.log
+*.log
+
+# Firebase Local Emulators & AI Studio Session Artifacts
+.firebase/
+.aistudio/

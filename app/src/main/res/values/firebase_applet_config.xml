@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<resources>
+    <string name="firestore_database_id" translatable="false">ai-studio-android-pulsewav-bd351eed-7a16-413c-8b1c-965628d2641c</string>
+    <string name="recaptcha_site_key" translatable="false">6LeDkSQuAAAAADfIpTNNAYOxm1TAmhxQ_yLWJ_jn</string>
+</resources>

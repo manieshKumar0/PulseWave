@@ -1,0 +1,492 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: deny everything by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isStringBounded(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isValidTimestamp(ts) {
+      return ts is timestamp && ts <= request.time;
+    }
+
+    function isSonicScore(val) {
+      return val is int && val >= 0 && val <= 100;
+    }
+
+    function isValidUserProfile(data) {
+      return isStringBounded(data.userId, 1, 128) &&
+             isStringBounded(data.displayName, 1, 60) &&
+             isStringBounded(data.handle, 2, 30) &&
+             data.discoverable is bool &&
+             data.topGenres is list && data.topGenres.size() <= 8 &&
+             (data.topGenres.size() == 0 || data.topGenres[0] is string) &&
+             data.listeningMinutes is int && data.listeningMinutes >= 0 &&
+             data.streakDays is int && data.streakDays >= 0 &&
+             (!('avatarUrl' in data) || isStringBounded(data.avatarUrl, 0, 500)) &&
+             (!('bio' in data) || isStringBounded(data.bio, 0, 240)) &&
+             (!('sonicEnergy' in data) || isSonicScore(data.sonicEnergy)) &&
+             (!('sonicValence' in data) || isSonicScore(data.sonicValence)) &&
+             (!('sonicTempo' in data) || isSonicScore(data.sonicTempo)) &&
+             (!('sonicAcoustic' in data) || isSonicScore(data.sonicAcoustic)) &&
+             (!('sonicElectronic' in data) || isSonicScore(data.sonicElectronic)) &&
+             (!('sonicChill' in data) || isSonicScore(data.sonicChill)) &&
+             (!('nowPlayingTitle' in data) || isStringBounded(data.nowPlayingTitle, 0, 120)) &&
+             (!('nowPlayingArtist' in data) || isStringBounded(data.nowPlayingArtist, 0, 120));
+    }
+
+    function isValidSyncedTrack(data) {
+      return isStringBounded(data.userId, 1, 128) &&
+             isStringBounded(data.trackId, 1, 128) &&
+             isStringBounded(data.title, 1, 160) &&
+             isStringBounded(data.artist, 1, 120) &&
+             isStringBounded(data.sourceType, 1, 30) &&
+             data.liked is bool &&
+             data.playCount is int && data.playCount >= 0 &&
+             data.lastPositionMs is int && data.lastPositionMs >= 0 &&
+             (!('album' in data) || isStringBounded(data.album, 0, 160)) &&
+             (!('genre' in data) || isStringBounded(data.genre, 0, 60)) &&
+             (!('mood' in data) || isStringBounded(data.mood, 0, 60)) &&
+             (!('bpm' in data) || (data.bpm is int && data.bpm >= 0 && data.bpm <= 300)) &&
+             (!('durationMs' in data) || (data.durationMs is int && data.durationMs >= 0)) &&
+             (!('artworkUrl' in data) || isStringBounded(data.artworkUrl, 0, 600)) &&
+             (!('streamUrl' in data) || isStringBounded(data.streamUrl, 0, 600));
+    }
+
+    function isValidFriendRequest(data) {
+      return isStringBounded(data.fromUid, 1, 128) &&
+             isStringBounded(data.fromName, 1, 60) &&
+             isStringBounded(data.fromHandle, 2, 30) &&
+             isStringBounded(data.toUid, 1, 128) &&
+             isStringBounded(data.toName, 1, 60) &&
+             isStringBounded(data.toHandle, 2, 30) &&
+             data.participantUids is list && data.participantUids.size() == 2 &&
+             data.participantUids[0] is string &&
+             data.status in ['PENDING', 'ACCEPTED'];
+    }
+
+    function isValidFeedPost(data) {
+      return isStringBounded(data.authorUid, 1, 128) &&
+             isStringBounded(data.authorName, 1, 60) &&
+             isStringBounded(data.authorHandle, 2, 30) &&
+             data.visibility in ['PUBLIC', 'PRIVATE'] &&
+             data.postType in ['TRACK', 'LYRIC_CARD', 'PLAYLIST', 'SOUNDSCAPE'] &&
+             isStringBounded(data.trackId, 1, 128) &&
+             isStringBounded(data.trackTitle, 1, 160) &&
+             isStringBounded(data.artist, 1, 120) &&
+             isStringBounded(data.caption, 0, 400) &&
+             data.likeUids is list && data.likeUids.size() <= 200 &&
+             (data.likeUids.size() == 0 || data.likeUids[0] is string) &&
+             data.commentCount is int && data.commentCount >= 0 &&
+             (!('artworkUrl' in data) || isStringBounded(data.artworkUrl, 0, 600)) &&
+             (!('streamUrl' in data) || isStringBounded(data.streamUrl, 0, 600)) &&
+             (!('lyricQuote' in data) || isStringBounded(data.lyricQuote, 0, 300)) &&
+             (!('soundscapeLabel' in data) || isStringBounded(data.soundscapeLabel, 0, 80));
+    }
+
+    function isValidFeedComment(data) {
+      return isStringBounded(data.postId, 1, 128) &&
+             data.postVisibility in ['PUBLIC', 'PRIVATE'] &&
+             isStringBounded(data.authorUid, 1, 128) &&
+             isStringBounded(data.authorName, 1, 60) &&
+             isStringBounded(data.text, 1, 300);
+    }
+
+    function isValidConversation(data) {
+      return data.participantUids is list && data.participantUids.size() == 2 &&
+             data.participantUids[0] is string &&
+             isStringBounded(data.participantLabel, 1, 120) &&
+             isStringBounded(data.lastMessageText, 0, 500) &&
+             isStringBounded(data.lastSenderUid, 1, 128);
+    }
+
+    function isValidMessage(data) {
+      return isStringBounded(data.senderUid, 1, 128) &&
+             isStringBounded(data.senderName, 1, 60) &&
+             data.participantUids is list && data.participantUids.size() == 2 &&
+             data.participantUids[0] is string &&
+             isStringBounded(data.text, 0, 500) &&
+             data.attachmentType in ['NONE', 'TRACK', 'PLAYLIST', 'SOUNDSCAPE', 'LYRIC'] &&
+             (!('attachedId' in data) || isStringBounded(data.attachedId, 0, 128)) &&
+             (!('attachedTitle' in data) || isStringBounded(data.attachedTitle, 0, 160)) &&
+             (!('attachedSubtitle' in data) || isStringBounded(data.attachedSubtitle, 0, 160)) &&
+             (!('attachedArtworkUrl' in data) || isStringBounded(data.attachedArtworkUrl, 0, 600)) &&
+             (!('attachedStreamUrl' in data) || isStringBounded(data.attachedStreamUrl, 0, 600));
+    }
+
+    function isValidPlaylist(data) {
+      return isStringBounded(data.ownerUid, 1, 128) &&
+             isStringBounded(data.ownerName, 1, 60) &&
+             data.collaboratorUids is list && data.collaboratorUids.size() >= 1 && data.collaboratorUids.size() <= 30 &&
+             data.collaboratorUids[0] is string &&
+             isStringBounded(data.title, 1, 80) &&
+             isStringBounded(data.description, 0, 240) &&
+             data.collaborative is bool &&
+             data.discoverable is bool &&
+             data.trackItems is list && data.trackItems.size() <= 50;
+    }
+
+    function isValidPulseRoom(data) {
+      return isStringBounded(data.hostUid, 1, 128) &&
+             isStringBounded(data.hostName, 1, 60) &&
+             isStringBounded(data.roomName, 1, 60) &&
+             isStringBounded(data.moodTag, 1, 40) &&
+             data.active is bool &&
+             data.memberUids is list && data.memberUids.size() >= 1 && data.memberUids.size() <= 50 &&
+             data.memberUids[0] is string &&
+             isStringBounded(data.currentTrackId, 1, 128) &&
+             isStringBounded(data.trackTitle, 1, 160) &&
+             isStringBounded(data.artist, 1, 120) &&
+             data.playing is bool &&
+             data.positionMs is int && data.positionMs >= 0 &&
+             isStringBounded(data.soundscapePreset, 1, 40) &&
+             (!('artworkUrl' in data) || isStringBounded(data.artworkUrl, 0, 600)) &&
+             (!('streamUrl' in data) || isStringBounded(data.streamUrl, 0, 600));
+    }
+
+    function isValidRoomQueueItem(data) {
+      return data.roomActive is bool &&
+             isStringBounded(data.trackId, 1, 128) &&
+             isStringBounded(data.title, 1, 160) &&
+             isStringBounded(data.artist, 1, 120) &&
+             isStringBounded(data.addedByUid, 1, 128) &&
+             isStringBounded(data.addedByName, 1, 60) &&
+             (!('artworkUrl' in data) || isStringBounded(data.artworkUrl, 0, 600)) &&
+             (!('streamUrl' in data) || isStringBounded(data.streamUrl, 0, 600));
+    }
+
+    function isValidRoomReaction(data) {
+      return data.roomActive is bool &&
+             isStringBounded(data.senderUid, 1, 128) &&
+             isStringBounded(data.senderName, 1, 60) &&
+             isStringBounded(data.emoji, 1, 16);
+    }
+
+    function isValidLyricNote(data) {
+      return isStringBounded(data.trackKey, 1, 128) &&
+             isStringBounded(data.authorUid, 1, 128) &&
+             isStringBounded(data.authorName, 1, 60) &&
+             data.timestampMs is int && data.timestampMs >= 0 &&
+             isStringBounded(data.noteText, 1, 200) &&
+             data.shared is bool;
+    }
+
+    // 1. User Profiles & Private Synced Library
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (request.auth.uid == userId || existing().discoverable == true);
+      allow list: if isSignedIn() && existing().discoverable == true;
+
+      allow create: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'displayName', 'handle', 'discoverable', 'topGenres', 'listeningMinutes', 'streakDays', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'displayName', 'handle', 'avatarUrl', 'bio', 'discoverable', 'topGenres', 'sonicEnergy', 'sonicValence', 'sonicTempo', 'sonicAcoustic', 'sonicElectronic', 'sonicChill', 'listeningMinutes', 'streakDays', 'nowPlayingTitle', 'nowPlayingArtist', 'createdAt', 'updatedAt']) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       isValidUserProfile(incoming());
+
+      allow update: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       isValidUserProfile(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'handle', 'avatarUrl', 'bio', 'discoverable', 'topGenres', 'sonicEnergy', 'sonicValence', 'sonicTempo', 'sonicAcoustic', 'sonicElectronic', 'sonicChill', 'listeningMinutes', 'streakDays', 'nowPlayingTitle', 'nowPlayingArtist', 'updatedAt']);
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      match /syncedLibrary/{trackKey} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(trackKey);
+        allow list: if isOwner(userId) && isValidId(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(trackKey) &&
+                         incoming().userId == request.auth.uid &&
+                         incoming().keys().hasAll(['userId', 'trackId', 'title', 'artist', 'sourceType', 'liked', 'playCount', 'lastPositionMs', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'trackId', 'title', 'artist', 'album', 'genre', 'mood', 'bpm', 'durationMs', 'artworkUrl', 'streamUrl', 'sourceType', 'liked', 'playCount', 'lastPositionMs', 'createdAt', 'updatedAt']) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         isValidSyncedTrack(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(trackKey) &&
+                         isValidSyncedTrack(incoming()) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['title', 'artist', 'album', 'genre', 'mood', 'bpm', 'durationMs', 'artworkUrl', 'streamUrl', 'liked', 'playCount', 'lastPositionMs', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(trackKey);
+      }
+    }
+
+    // 2. Friend Requests & Connections
+    match /friendRequests/{requestId} {
+      allow get: if isSignedIn() && isValidId(requestId) && (request.auth.uid in existing().participantUids);
+      allow list: if isSignedIn() && (request.auth.uid in existing().participantUids);
+
+      allow create: if isSignedIn() &&
+                       isValidId(requestId) &&
+                       incoming().fromUid == request.auth.uid &&
+                       incoming().toUid != request.auth.uid &&
+                       (request.auth.uid in incoming().participantUids) &&
+                       (incoming().toUid in incoming().participantUids) &&
+                       incoming().status == 'PENDING' &&
+                       incoming().keys().hasAll(['fromUid', 'fromName', 'fromHandle', 'toUid', 'toName', 'toHandle', 'participantUids', 'status', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['fromUid', 'fromName', 'fromHandle', 'toUid', 'toName', 'toHandle', 'participantUids', 'status', 'createdAt', 'updatedAt']) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       isValidFriendRequest(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(requestId) &&
+                       isValidFriendRequest(incoming()) &&
+                       request.auth.uid == existing().toUid &&
+                       existing().status == 'PENDING' &&
+                       incoming().status == 'ACCEPTED' &&
+                       incoming().fromUid == existing().fromUid &&
+                       incoming().toUid == existing().toUid &&
+                       incoming().participantUids == existing().participantUids &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(requestId) && (request.auth.uid in existing().participantUids);
+    }
+
+    // 3. Social Music Feed Posts & Comments
+    match /feedPosts/{postId} {
+      allow get: if isSignedIn() && isValidId(postId) && (existing().visibility == 'PUBLIC' || existing().authorUid == request.auth.uid);
+      allow list: if isSignedIn() && (existing().visibility == 'PUBLIC' || existing().authorUid == request.auth.uid);
+
+      allow create: if isSignedIn() &&
+                       isValidId(postId) &&
+                       incoming().authorUid == request.auth.uid &&
+                       incoming().keys().hasAll(['authorUid', 'authorName', 'authorHandle', 'visibility', 'postType', 'trackId', 'trackTitle', 'artist', 'caption', 'likeUids', 'commentCount', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['authorUid', 'authorName', 'authorHandle', 'visibility', 'postType', 'trackId', 'trackTitle', 'artist', 'artworkUrl', 'streamUrl', 'caption', 'lyricQuote', 'soundscapeLabel', 'likeUids', 'commentCount', 'createdAt', 'updatedAt']) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       isValidFeedPost(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(postId) &&
+                       isValidFeedPost(incoming()) &&
+                       incoming().authorUid == existing().authorUid &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       (
+                         (request.auth.uid == existing().authorUid && incoming().diff(existing()).affectedKeys().hasOnly(['caption', 'visibility', 'updatedAt'])) ||
+                         (existing().visibility == 'PUBLIC' && incoming().diff(existing()).affectedKeys().hasOnly(['likeUids', 'updatedAt'])) ||
+                         (existing().visibility == 'PUBLIC' && incoming().diff(existing()).affectedKeys().hasOnly(['commentCount', 'updatedAt']))
+                       );
+
+      allow delete: if isSignedIn() && isValidId(postId) && existing().authorUid == request.auth.uid;
+
+      match /comments/{commentId} {
+        allow get: if isSignedIn() && isValidId(postId) && isValidId(commentId) && existing().postVisibility == 'PUBLIC';
+        allow list: if isSignedIn() && isValidId(postId) && existing().postVisibility == 'PUBLIC';
+
+        allow create: if isSignedIn() &&
+                         isValidId(postId) &&
+                         isValidId(commentId) &&
+                         exists(/databases/$(database)/documents/feedPosts/$(postId)) &&
+                         incoming().authorUid == request.auth.uid &&
+                         incoming().postId == postId &&
+                         incoming().keys().hasAll(['postId', 'postVisibility', 'authorUid', 'authorName', 'text', 'createdAt']) &&
+                         incoming().keys().hasOnly(['postId', 'postVisibility', 'authorUid', 'authorName', 'text', 'createdAt']) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidFeedComment(incoming());
+
+        allow delete: if isSignedIn() && isValidId(postId) && isValidId(commentId) && existing().authorUid == request.auth.uid;
+      }
+    }
+
+    // 4. Direct Messages (1:1 Chat + Playable Music Cards)
+    match /conversations/{conversationId} {
+      allow get: if isSignedIn() && isValidId(conversationId) && (request.auth.uid in existing().participantUids);
+      allow list: if isSignedIn() && (request.auth.uid in existing().participantUids);
+
+      allow create: if isSignedIn() &&
+                       isValidId(conversationId) &&
+                       (request.auth.uid in incoming().participantUids) &&
+                       incoming().lastSenderUid == request.auth.uid &&
+                       incoming().keys().hasAll(['participantUids', 'participantLabel', 'lastMessageText', 'lastSenderUid', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['participantUids', 'participantLabel', 'lastMessageText', 'lastSenderUid', 'createdAt', 'updatedAt']) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       isValidConversation(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(conversationId) &&
+                       isValidConversation(incoming()) &&
+                       (request.auth.uid in existing().participantUids) &&
+                       incoming().participantUids == existing().participantUids &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().lastSenderUid == request.auth.uid &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['lastMessageText', 'lastSenderUid', 'participantLabel', 'updatedAt']);
+
+      match /messages/{messageId} {
+        allow get: if isSignedIn() && isValidId(conversationId) && isValidId(messageId) && (request.auth.uid in existing().participantUids);
+        allow list: if isSignedIn() && isValidId(conversationId) && (request.auth.uid in existing().participantUids);
+
+        allow create: if isSignedIn() &&
+                         isValidId(conversationId) &&
+                         isValidId(messageId) &&
+                         exists(/databases/$(database)/documents/conversations/$(conversationId)) &&
+                         (request.auth.uid in incoming().participantUids) &&
+                         incoming().senderUid == request.auth.uid &&
+                         incoming().keys().hasAll(['senderUid', 'senderName', 'participantUids', 'text', 'attachmentType', 'createdAt']) &&
+                         incoming().keys().hasOnly(['senderUid', 'senderName', 'participantUids', 'text', 'attachmentType', 'attachedId', 'attachedTitle', 'attachedSubtitle', 'attachedArtworkUrl', 'attachedStreamUrl', 'createdAt']) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidMessage(incoming());
+      }
+    }
+
+    // 5. Real-Time Collaborative Playlists
+    match /playlists/{playlistId} {
+      allow get: if isSignedIn() && isValidId(playlistId) && ((request.auth.uid in existing().collaboratorUids) || existing().discoverable == true);
+      allow list: if isSignedIn() && ((request.auth.uid in existing().collaboratorUids) || existing().discoverable == true);
+
+      allow create: if isSignedIn() &&
+                       isValidId(playlistId) &&
+                       incoming().ownerUid == request.auth.uid &&
+                       (request.auth.uid in incoming().collaboratorUids) &&
+                       incoming().keys().hasAll(['ownerUid', 'ownerName', 'collaboratorUids', 'title', 'description', 'collaborative', 'discoverable', 'trackItems', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['ownerUid', 'ownerName', 'collaboratorUids', 'title', 'description', 'collaborative', 'discoverable', 'trackItems', 'createdAt', 'updatedAt']) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       isValidPlaylist(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(playlistId) &&
+                       isValidPlaylist(incoming()) &&
+                       incoming().ownerUid == existing().ownerUid &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       (
+                         (request.auth.uid == existing().ownerUid && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'collaboratorUids', 'collaborative', 'discoverable', 'trackItems', 'updatedAt'])) ||
+                         ((request.auth.uid in existing().collaboratorUids) && incoming().diff(existing()).affectedKeys().hasOnly(['trackItems', 'updatedAt']))
+                       );
+
+      allow delete: if isSignedIn() && isValidId(playlistId) && existing().ownerUid == request.auth.uid;
+    }
+
+    // 6. Live Co-Listening PulseRooms, Shared Queues & Reactions
+    match /pulseRooms/{roomId} {
+      allow get: if isSignedIn() && isValidId(roomId) && (existing().active == true || (request.auth.uid in existing().memberUids));
+      allow list: if isSignedIn() && existing().active == true;
+
+      allow create: if isSignedIn() &&
+                       isValidId(roomId) &&
+                       incoming().hostUid == request.auth.uid &&
+                       (request.auth.uid in incoming().memberUids) &&
+                       incoming().keys().hasAll(['hostUid', 'hostName', 'roomName', 'moodTag', 'active', 'memberUids', 'currentTrackId', 'trackTitle', 'artist', 'playing', 'positionMs', 'soundscapePreset', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['hostUid', 'hostName', 'roomName', 'moodTag', 'active', 'memberUids', 'currentTrackId', 'trackTitle', 'artist', 'artworkUrl', 'streamUrl', 'playing', 'positionMs', 'soundscapePreset', 'createdAt', 'updatedAt']) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       isValidPulseRoom(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(roomId) &&
+                       isValidPulseRoom(incoming()) &&
+                       incoming().hostUid == existing().hostUid &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       (
+                         (request.auth.uid == existing().hostUid && incoming().diff(existing()).affectedKeys().hasOnly(['roomName', 'moodTag', 'active', 'memberUids', 'currentTrackId', 'trackTitle', 'artist', 'artworkUrl', 'streamUrl', 'playing', 'positionMs', 'soundscapePreset', 'updatedAt'])) ||
+                         (existing().active == true && incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'updatedAt']))
+                       );
+
+      allow delete: if isSignedIn() && isValidId(roomId) && existing().hostUid == request.auth.uid;
+
+      match /queue/{queueId} {
+        allow get: if isSignedIn() && isValidId(roomId) && isValidId(queueId) && existing().roomActive == true;
+        allow list: if isSignedIn() && isValidId(roomId) && existing().roomActive == true;
+
+        allow create: if isSignedIn() &&
+                         isValidId(roomId) &&
+                         isValidId(queueId) &&
+                         exists(/databases/$(database)/documents/pulseRooms/$(roomId)) &&
+                         incoming().addedByUid == request.auth.uid &&
+                         incoming().keys().hasAll(['roomActive', 'trackId', 'title', 'artist', 'addedByUid', 'addedByName', 'createdAt']) &&
+                         incoming().keys().hasOnly(['roomActive', 'trackId', 'title', 'artist', 'artworkUrl', 'streamUrl', 'addedByUid', 'addedByName', 'createdAt']) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidRoomQueueItem(incoming());
+
+        allow delete: if isSignedIn() && isValidId(roomId) && isValidId(queueId) &&
+                         (existing().addedByUid == request.auth.uid || get(/databases/$(database)/documents/pulseRooms/$(roomId)).data.hostUid == request.auth.uid);
+      }
+
+      match /reactions/{reactionId} {
+        allow get: if isSignedIn() && isValidId(roomId) && isValidId(reactionId) && existing().roomActive == true;
+        allow list: if isSignedIn() && isValidId(roomId) && existing().roomActive == true;
+
+        allow create: if isSignedIn() &&
+                         isValidId(roomId) &&
+                         isValidId(reactionId) &&
+                         exists(/databases/$(database)/documents/pulseRooms/$(roomId)) &&
+                         incoming().senderUid == request.auth.uid &&
+                         incoming().keys().hasAll(['roomActive', 'senderUid', 'senderName', 'emoji', 'createdAt']) &&
+                         incoming().keys().hasOnly(['roomActive', 'senderUid', 'senderName', 'emoji', 'createdAt']) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidRoomReaction(incoming());
+      }
+    }
+
+    // 7. Beat-Reactive Lyric Canvas Shared Friend Notes
+    match /lyricNotes/{noteId} {
+      allow get: if isSignedIn() && isValidId(noteId) && (existing().shared == true || existing().authorUid == request.auth.uid);
+      allow list: if isSignedIn() && existing().shared == true;
+
+      allow create: if isSignedIn() &&
+                       isValidId(noteId) &&
+                       incoming().authorUid == request.auth.uid &&
+                       incoming().keys().hasAll(['trackKey', 'authorUid', 'authorName', 'timestampMs', 'noteText', 'shared', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['trackKey', 'authorUid', 'authorName', 'timestampMs', 'noteText', 'shared', 'createdAt', 'updatedAt']) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       isValidLyricNote(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(noteId) &&
+                       isValidLyricNote(incoming()) &&
+                       existing().authorUid == request.auth.uid &&
+                       incoming().authorUid == existing().authorUid &&
+                       incoming().trackKey == existing().trackKey &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['noteText', 'shared', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(noteId) && existing().authorUid == request.auth.uid;
+    }
+  }
+}
