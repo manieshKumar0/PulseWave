@@ -64,28 +64,6 @@ Users can either sign in with **Google (`CredentialManager`)** for full cloud sy
 
 ---
 
-## Brand Assets & Screenshots
-
-### Brand Identity & Bundled Visuals
-
-| App Logo | Adaptive Launcher Icon | Auth Horizon Backdrop |
-| :---: | :---: | :---: |
-| <img src="app/src/main/res/drawable/ic_pulsewave_logo.png" alt="PulseWave Emblem" width="140" /> | <img src="app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png" alt="PulseWave App Icon" width="120" /> | <img src="app/src/main/res/drawable/bg_auth_teal_horizon.png" alt="Auth Horizon Background" width="140" /> |
-
-| Sonic DNA Banner | PulseRoom Cover | Empty Vault Artwork |
-| :---: | :---: | :---: |
-| <img src="app/src/main/res/drawable/img_sonic_dna_banner.jpg" alt="Sonic DNA Banner" width="220" /> | <img src="app/src/main/res/drawable/img_pulseroom_cover.jpg" alt="PulseRoom Cover" width="220" /> | <img src="app/src/main/res/drawable/img_empty_library.jpg" alt="Library Artwork" width="220" /> |
-
-### App Screenshots
-
-> Add your emulator/device captures to `docs/screenshots/` using the filenames below to populate the full screen gallery on GitHub.
-
-| Sign-In / Skip Horizon | For You AI Feed | Now Playing & Hinglish Lyrics | PulseRooms & Social Hub |
-| :---: | :---: | :---: | :---: |
-| `docs/screenshots/auth.png` | `docs/screenshots/for_you.png` | `docs/screenshots/now_playing_lyrics.png` | `docs/screenshots/social_pulseroom.png` |
-
----
-
 ## Architecture & Project Structure
 
 PulseWave follows **MVVM + Repository** clean separation with unidirectional `StateFlow` UI state streams (`UiState<T>`).
