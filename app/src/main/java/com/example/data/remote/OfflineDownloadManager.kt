@@ -7,89 +7,147 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.ConcurrentHashMap
 
 class OfflineDownloadManager(
     private val context: Context,
     private val libraryRepo: LocalLibraryRepository,
-    private val lrclibClient: LrclibClient
+    private val lrclibClient: LrclibClient,
+    private val youTubeClient: YouTubeMusicClient = YouTubeMusicClient.shared
 ) {
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .build()
+    private val client: OkHttpClient = youTubeClient.playbackOkHttpClient
+    private val activeDownloads = ConcurrentHashMap.newKeySet<String>()
 
     private val _downloadProgress = MutableStateFlow<Map<String, Float>>(emptyMap())
     val downloadProgress: StateFlow<Map<String, Float>> = _downloadProgress.asStateFlow()
 
     suspend fun downloadTrack(track: Track): Result<Track> = withContext(Dispatchers.IO) {
-        val url = track.streamUrl
-        if (url.isBlank()) {
-            return@withContext Result.failure(IllegalArgumentException("Track has no downloadable stream URL"))
+        if (!activeDownloads.add(track.id)) {
+            return@withContext Result.failure(IllegalStateException("Download already in progress"))
         }
+        val audioDir = File(context.filesDir, "offline_audio").apply { mkdirs() }
+        val artDir = File(context.filesDir, "offline_artwork").apply { mkdirs() }
+        val safeName = track.id.replace(Regex("[^a-zA-Z0-9_\\-]"), "_")
+        val tempFile = File(audioDir, "$safeName.tmp")
 
         try {
-            updateProgress(track.id, 0.05f)
-            libraryRepo.upsertTrack(track)
+            updateProgress(track.id, 0.03f)
 
-            val audioDir = File(context.filesDir, "offline_audio").apply { mkdirs() }
-            val artDir = File(context.filesDir, "offline_artwork").apply { mkdirs() }
-            val safeName = track.id.replace(Regex("[^a-zA-Z0-9_\\-]"), "_")
-            val targetFile = File(audioDir, "$safeName.mp3")
-            val tempFile = File(audioDir, "$safeName.tmp")
-            var downloadedMime = "audio/mpeg"
+            var candidateStream = resolveDirectDownloadTarget(track, forceRefresh = false)
+            var downloadedMime = candidateStream.mimeType.ifBlank { "audio/mpeg" }
 
-            val request = Request.Builder().url(url).build()
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    throw IllegalStateException("Download failed with HTTP ${response.code}")
+            var attempt = 0
+            var downloadCompleted = false
+            var lastError: Exception? = null
+
+            while (attempt < 2 && !downloadCompleted) {
+                attempt++
+                val reqBuilder = Request.Builder().url(candidateStream.url)
+                candidateStream.headers.forEach { (k, v) ->
+                    reqBuilder.header(k, v)
                 }
-                response.header("Content-Type")?.takeIf { it.isNotBlank() }?.let {
-                    downloadedMime = it.substringBefore(';').trim()
-                }
-                val body = response.body ?: throw IllegalStateException("Empty audio response body")
-                val totalBytes = body.contentLength()
-                var bytesCopied = 0L
 
-                body.byteStream().use { input ->
-                    FileOutputStream(tempFile).use { output ->
-                        val buffer = ByteArray(16 * 1024)
-                        while (true) {
-                            val read = input.read(buffer)
-                            if (read == -1) break
-                            output.write(buffer, 0, read)
-                            bytesCopied += read
-                            if (totalBytes > 0) {
-                                updateProgress(track.id, (bytesCopied.toFloat() / totalBytes).coerceIn(0.05f, 0.90f))
+                try {
+                    client.newCall(reqBuilder.build()).execute().use { response ->
+                        if (response.code in listOf(403, 404, 410) && attempt == 1 && track.youtubeVideoId != null) {
+                            youTubeClient.markStreamFailedAndInvalidate(track.youtubeVideoId!!)
+                            candidateStream = resolveDirectDownloadTarget(track, forceRefresh = true)
+                            downloadedMime = candidateStream.mimeType.ifBlank { downloadedMime }
+                            return@use
+                        }
+                        if (!response.isSuccessful) {
+                            throw IllegalStateException("Download failed with HTTP ${response.code}")
+                        }
+                        response.header("Content-Type")?.takeIf { it.isNotBlank() }?.let {
+                            downloadedMime = it.substringBefore(';').trim()
+                        }
+                        val body = response.body ?: throw IllegalStateException("Empty audio response body")
+                        val totalBytes = body.contentLength()
+                        var bytesCopied = 0L
+                        var lastReportedProgress = 0.03f
+
+                        body.byteStream().use { input ->
+                            FileOutputStream(tempFile).use { output ->
+                                val buffer = ByteArray(16 * 1024)
+                                while (true) {
+                                    val read = input.read(buffer)
+                                    if (read == -1) break
+                                    output.write(buffer, 0, read)
+                                    bytesCopied += read
+
+                                    val nextProgress = if (totalBytes > 0L) {
+                                        (0.08f + (bytesCopied.toFloat() / totalBytes.toFloat()) * 0.82f)
+                                            .coerceIn(0.08f, 0.90f)
+                                    } else {
+                                        (0.10f + (bytesCopied.toFloat() / 5_000_000f) * 0.78f)
+                                            .coerceIn(0.10f, 0.88f)
+                                    }
+                                    if (nextProgress - lastReportedProgress >= 0.02f) {
+                                        lastReportedProgress = nextProgress
+                                        updateProgress(track.id, nextProgress)
+                                    }
+                                }
+                                output.flush()
                             }
                         }
-                        output.flush()
+
+                        if (!tempFile.exists() || tempFile.length() == 0L) {
+                            throw IllegalStateException("Downloaded audio file was empty")
+                        }
+                        downloadCompleted = true
                     }
+                } catch (e: Exception) {
+                    lastError = e
+                    if (attempt == 1 && track.youtubeVideoId != null) {
+                        youTubeClient.markStreamFailedAndInvalidate(track.youtubeVideoId!!)
+                        val refreshed = runCatching {
+                            resolveDirectDownloadTarget(track, forceRefresh = true)
+                        }.getOrNull()
+                        if (refreshed != null && refreshed.url != candidateStream.url) {
+                            candidateStream = refreshed
+                            downloadedMime = refreshed.mimeType.ifBlank { downloadedMime }
+                            continue
+                        }
+                    }
+                    break
                 }
             }
 
+            if (!downloadCompleted) {
+                throw (lastError ?: IllegalStateException("Download failed"))
+            }
+
+            val extension = when {
+                downloadedMime.contains("mp4", ignoreCase = true) ||
+                    downloadedMime.contains("m4a", ignoreCase = true) -> "m4a"
+                downloadedMime.contains("webm", ignoreCase = true) -> "webm"
+                downloadedMime.contains("ogg", ignoreCase = true) -> "ogg"
+                else -> "mp3"
+            }
+            val targetFile = File(audioDir, "$safeName.$extension")
             if (targetFile.exists()) targetFile.delete()
             if (!tempFile.renameTo(targetFile)) {
                 tempFile.copyTo(targetFile, overwrite = true)
                 tempFile.delete()
             }
 
-            // Cache cover artwork locally so artwork renders cleanly while offline
+            updateProgress(track.id, 0.94f)
             val cachedArtPath = downloadArtworkIfAvailable(
                 artworkUrl = track.artworkUrl,
                 artDir = artDir,
                 safeName = safeName
             )
-            updateProgress(track.id, 0.95f)
 
             val lyrics = if (track.syncedLrcText.isBlank() && track.plainLyrics.isBlank()) {
-                lrclibClient.fetchLyrics(track.title, track.artist, track.durationMs, track.album)
+                runCatching {
+                    lrclibClient.fetchLyrics(track.title, track.artist, track.durationMs, track.album)
+                }.getOrDefault(LyricsPayload("", ""))
             } else {
                 LyricsPayload(track.syncedLrcText, track.plainLyrics)
             }
@@ -112,11 +170,86 @@ class OfflineDownloadManager(
                 fileSizeBytes = totalSizeBytes,
                 mimeType = downloadedMime
             )
-            updateProgress(track.id, null)
             Result.success(saved)
         } catch (e: Exception) {
-            updateProgress(track.id, null)
             Result.failure(e)
+        } finally {
+            if (tempFile.exists()) {
+                runCatching { tempFile.delete() }
+            }
+            activeDownloads.remove(track.id)
+            updateProgress(track.id, null)
+        }
+    }
+
+    private suspend fun resolveDirectDownloadTarget(
+        track: Track,
+        forceRefresh: Boolean
+    ): DownloadTarget {
+        if (!forceRefresh &&
+            track.streamUrl.startsWith("http", ignoreCase = true) &&
+            !track.streamUrl.contains(".m3u8", ignoreCase = true)
+        ) {
+            return DownloadTarget(
+                url = track.streamUrl,
+                mimeType = "audio/mpeg",
+                headers = emptyMap()
+            )
+        }
+
+        val videoId = track.youtubeVideoId
+        if (videoId != null) {
+            val resolved = youTubeClient.resolveAudioStream(
+                videoId = videoId,
+                forceRefresh = forceRefresh,
+                trackTitle = track.title,
+                trackArtist = track.artist,
+                trackDurationMs = track.durationMs
+            ).getOrNull()
+
+            if (resolved != null && !resolved.isHls && !resolved.url.contains(".m3u8", ignoreCase = true)) {
+                return DownloadTarget(
+                    url = resolved.url,
+                    mimeType = resolved.mimeType,
+                    headers = resolved.requestHeaders
+                )
+            }
+        }
+
+        val fallback = FallbackAudioResolver(client) { url, headers ->
+            probeDirectStream(url, headers)
+        }.resolveMatchingStream(
+            title = track.title,
+            artist = track.artist,
+            expectedDurationMs = track.durationMs,
+            preferHighQuality = youTubeClient.preferHighQuality
+        )
+        if (fallback != null && !fallback.isHls) {
+            return DownloadTarget(
+                url = fallback.url,
+                mimeType = fallback.mimeType,
+                headers = fallback.requestHeaders
+            )
+        }
+
+        throw IllegalStateException("Direct downloadable audio is unavailable for this track right now")
+    }
+
+    private fun probeDirectStream(url: String, headers: Map<String, String>): Boolean {
+        return try {
+            val req = Request.Builder()
+                .url(url)
+                .header("Range", "bytes=0-1")
+                .apply {
+                    headers.forEach { (k, v) -> header(k, v) }
+                }
+                .get()
+                .build()
+            client.newCall(req).execute().use { resp ->
+                resp.isSuccessful || resp.code == 206
+            }
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -161,12 +294,15 @@ class OfflineDownloadManager(
     }
 
     private fun updateProgress(trackId: String, progress: Float?) {
-        val mutable = _downloadProgress.value.toMutableMap()
-        if (progress == null) {
-            mutable.remove(trackId)
-        } else {
-            mutable[trackId] = progress
+        _downloadProgress.update { current ->
+            if (progress == null) current - trackId
+            else current + (trackId to progress)
         }
-        _downloadProgress.value = mutable
     }
+
+    private data class DownloadTarget(
+        val url: String,
+        val mimeType: String,
+        val headers: Map<String, String>
+    )
 }

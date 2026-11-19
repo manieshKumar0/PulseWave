@@ -58,6 +58,10 @@ class LocalLibraryRepository(
         trackDao.getTrackById(id)?.toDomain()
     }
 
+    suspend fun getAllTracksSnapshot(): List<Track> = withContext(Dispatchers.IO) {
+        trackDao.getAllTracksSnapshot().map { it.toDomain() }
+    }
+
     suspend fun getOfflinePlayableSnapshot(): List<Track> = withContext(Dispatchers.IO) {
         trackDao.getAllTracksSnapshot()
             .filter {
@@ -119,7 +123,64 @@ class LocalLibraryRepository(
             val merged = tracks.map { track ->
                 mergePreservingLocalFields(track, existingById[track.id], now)
             }
-            trackDao.upsertAll(merged)
+            merged.chunked(500).forEach { chunk ->
+                trackDao.upsertAll(chunk)
+            }
+        }
+    }
+
+    suspend fun syncScannedDeviceTracks(
+        scanned: List<Track>,
+        deviceIdPrefix: String = "device_ms_"
+    ) = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        db.withTransaction {
+            val allExisting = trackDao.getAllTracksSnapshot()
+            val existingById = allExisting.associateBy { it.id }
+            val scannedIds = scanned.mapTo(HashSet()) { it.id }
+
+            val staleIds = allExisting
+                .filter { it.id.startsWith(deviceIdPrefix) && it.id !in scannedIds }
+                .map { it.id }
+            if (staleIds.isNotEmpty()) {
+                staleIds.chunked(500).forEach { chunk ->
+                    trackDao.deleteTracksByIds(chunk)
+                }
+            }
+
+            if (scanned.isNotEmpty()) {
+                val merged = scanned.map { track ->
+                    val existing = existingById[track.id]
+                    if (existing == null) {
+                        TrackEntity.fromDomain(track, now = now)
+                    } else {
+                        val hasResolvedArtist = existing.artist.isNotBlank() &&
+                            !existing.artist.equals("Local Device", ignoreCase = true)
+                        val hasResolvedAlbum = existing.album.isNotBlank() &&
+                            !existing.album.equals("On Device", ignoreCase = true)
+                        existing.copy(
+                            title = track.title.ifBlank { existing.title },
+                            artist = if (hasResolvedArtist) existing.artist else track.artist.ifBlank { existing.artist },
+                            album = if (hasResolvedAlbum) existing.album else track.album.ifBlank { existing.album },
+                            genre = track.genre.ifBlank { existing.genre },
+                            durationMs = if (track.durationMs > 0L) track.durationMs else existing.durationMs,
+                            artworkUrl = existing.artworkUrl.ifBlank { track.artworkUrl },
+                            localUri = track.localUri.ifBlank { existing.localUri },
+                            sourceType = TrackSourceType.LOCAL_SAF.name,
+                            isLiked = existing.isLiked,
+                            syncedLrcText = existing.syncedLrcText,
+                            plainLyrics = existing.plainLyrics,
+                            playCount = existing.playCount,
+                            lastPlayedAt = existing.lastPlayedAt,
+                            addedAt = existing.addedAt,
+                            cachedAt = now
+                        )
+                    }
+                }
+                merged.chunked(500).forEach { chunk ->
+                    trackDao.upsertAll(chunk)
+                }
+            }
         }
     }
 
@@ -276,7 +337,7 @@ class LocalLibraryRepository(
                 existing.sourceType == TrackSourceType.CLOUD_SAF.name
             ) existing.sourceType else incoming.sourceType.name,
             isDownloaded = incoming.isDownloaded || existing.isDownloaded,
-            isLiked = incoming.isLiked,
+            isLiked = existing.isLiked || incoming.isLiked,
             syncedLrcText = incoming.syncedLrcText.ifBlank { existing.syncedLrcText },
             plainLyrics = incoming.plainLyrics.ifBlank { existing.plainLyrics },
             playCount = maxOf(incoming.playCount, existing.playCount),

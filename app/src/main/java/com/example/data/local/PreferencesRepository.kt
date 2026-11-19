@@ -25,8 +25,15 @@ data class UserAppSettings(
     val eqBassBoost: Int = DefaultSoundscapes.presets.first().bassBoostStrength,
     val eqReverbPreset: Int = DefaultSoundscapes.presets.first().reverbPreset,
     val highResStreaming: Boolean = true,
-    val crossfadeSeconds: Int = 4
-)
+    val crossfadeSeconds: Int = 4,
+    val youtubeCookie: String = "",
+    val youtubeVisitorData: String = "",
+    val youtubeAccountLabel: String = ""
+) {
+    val isYouTubeConnected: Boolean
+        get() = youtubeCookie.isNotBlank() &&
+            (youtubeCookie.contains("SAPISID=") || youtubeCookie.contains("__Secure-3PAPISID="))
+}
 
 class PreferencesRepository(private val context: Context) {
     private object Keys {
@@ -40,6 +47,9 @@ class PreferencesRepository(private val context: Context) {
         val EQ_REVERB_PRESET = intPreferencesKey("eq_reverb_preset")
         val HIGH_RES_STREAMING = booleanPreferencesKey("high_res_streaming")
         val CROSSFADE_SECONDS = intPreferencesKey("crossfade_seconds")
+        val YOUTUBE_COOKIE = stringPreferencesKey("youtube_cookie")
+        val YOUTUBE_VISITOR_DATA = stringPreferencesKey("youtube_visitor_data")
+        val YOUTUBE_ACCOUNT_LABEL = stringPreferencesKey("youtube_account_label")
     }
 
     val settingsFlow: Flow<UserAppSettings> = context.pulseDataStore.data.map { prefs ->
@@ -61,7 +71,10 @@ class PreferencesRepository(private val context: Context) {
             eqBassBoost = (prefs[Keys.EQ_BASS_BOOST] ?: defaultPreset.bassBoostStrength).coerceIn(0, 1000),
             eqReverbPreset = (prefs[Keys.EQ_REVERB_PRESET] ?: defaultPreset.reverbPreset).coerceIn(0, 6),
             highResStreaming = prefs[Keys.HIGH_RES_STREAMING] ?: true,
-            crossfadeSeconds = (prefs[Keys.CROSSFADE_SECONDS] ?: 4).coerceIn(0, 12)
+            crossfadeSeconds = (prefs[Keys.CROSSFADE_SECONDS] ?: 4).coerceIn(0, 12),
+            youtubeCookie = prefs[Keys.YOUTUBE_COOKIE].orEmpty(),
+            youtubeVisitorData = prefs[Keys.YOUTUBE_VISITOR_DATA].orEmpty(),
+            youtubeAccountLabel = prefs[Keys.YOUTUBE_ACCOUNT_LABEL].orEmpty()
         )
     }
 
@@ -106,5 +119,25 @@ class PreferencesRepository(private val context: Context) {
 
     suspend fun setCrossfadeSeconds(seconds: Int) {
         context.pulseDataStore.edit { it[Keys.CROSSFADE_SECONDS] = seconds.coerceIn(0, 12) }
+    }
+
+    suspend fun setYouTubeSession(
+        cookie: String,
+        visitorData: String,
+        accountLabel: String
+    ) {
+        context.pulseDataStore.edit { prefs ->
+            prefs[Keys.YOUTUBE_COOKIE] = cookie.trim()
+            prefs[Keys.YOUTUBE_VISITOR_DATA] = visitorData.trim()
+            prefs[Keys.YOUTUBE_ACCOUNT_LABEL] = accountLabel.trim()
+        }
+    }
+
+    suspend fun clearYouTubeSession() {
+        context.pulseDataStore.edit { prefs ->
+            prefs.remove(Keys.YOUTUBE_COOKIE)
+            prefs.remove(Keys.YOUTUBE_VISITOR_DATA)
+            prefs.remove(Keys.YOUTUBE_ACCOUNT_LABEL)
+        }
     }
 }

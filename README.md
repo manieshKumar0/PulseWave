@@ -31,8 +31,10 @@ Users can either sign in with **Google (`CredentialManager`)** for full cloud sy
 - **One-Tap Google Sign-In**: Uses Jetpack `CredentialManager` (`GetGoogleIdOption` for silent session restore + `GetSignInWithGoogleOption` for explicit login) backed by Firebase Auth.
 - **Frictionless Guest Mode (`Skip →`)**: Top-right frosted **Skip →** pill enters the app in Guest Mode without running unauthorized Firestore queries, surfacing clean sign-in upgrade prompts whenever cloud-only social features are accessed.
 
-### 2. AI Music Discovery (`For You`)
-- **Live Streaming Catalog**: Fetches trending and mood-filtered tracks via **Audius REST API** (`AudiusApiService`).
+### 2. Universal Music Library & AI Discovery (`For You` & `Library`)
+- **YouTube Music Catalog & Search (`YouTubeMusicClient`)**: Full YouTube Music (`WEB_REMIX`) catalog search, mood discovery, and direct YouTube / YouTube Music link resolution so users can search and play commercial, regional, Bollywood, and global tracks seamlessly.
+- **Lazy On-Demand Stream Resolution**: Uses `NewPipeExtractor` + InnerTube multi-client extraction wired through Media3 `ResolvingDataSource` (`pulseyt://watch?v=<id>`) so expiring stream URLs are resolved dynamically on play/download with zero stale URL caching.
+- **Audius Indie Catalog (`AudiusApiService`)**: Blends trending and searched tracks from Audius alongside YouTube Music and local files.
 - **Gemini AI Curator**: Powered by **Firebase AI Logic** (`gemini-3.8-flash` / `gemini-3.5-flash-lite`) with App Check protection for natural-language AI DJ prompts, mood-matched feeds, and track vibe stories.
 - **Behavioral Sonic DNA**: Tracks listening signals, skips, completions, and feed card dwell times in Room to compute a 6-axis **Sonic DNA** profile (*Energy, Valence, Tempo, Acoustic, Electronic, Chill*).
 
@@ -108,11 +110,11 @@ PulseWave follows **MVVM + Repository** clean separation with unidirectional `St
 | Layer | Libraries & Services |
 | :--- | :--- |
 | **UI & Navigation** | Jetpack Compose BOM `2024.09.00`, Material 3, Navigation Compose `2.8.9` (Type-Safe `@Serializable` routes), Coil `2.7.0` |
-| **Audio & Media** | AndroidX Media3 ExoPlayer & MediaSession `1.6.1`, Android `Equalizer`, `BassBoost`, `PresetReverb` |
+| **Audio & Media** | AndroidX Media3 ExoPlayer (`DefaultLoadControl`, `ResolvingDataSource`, `OkHttpDataSource` `1.6.1`), MediaSession, Android `Equalizer`, `BassBoost`, `PresetReverb` |
 | **Local Storage** | Room `2.7.0` (KSP), DataStore Preferences `1.1.7`, Android Storage Access Framework (SAF) |
 | **Networking** | Retrofit `2.12.0`, OkHttp `4.10.0`, Moshi `1.15.2`, Kotlinx Serialization `1.8.0` |
 | **Cloud, Auth & AI** | Firebase BOM `34.17.0` (Auth, Firestore, AI Logic, App Check), Jetpack Credential Manager `1.5.0`, Google Identity Services |
-| **External APIs** | Audius Public Streaming API, LRCLIB Synced Lyrics API |
+| **External APIs & Extraction** | YouTube Music InnerTube (`WEB_REMIX`, `ANDROID_VR`, `TVHTML5`), rotating `X-Goog-Visitor-Id` sessions, Invidious/Piped proxy failover, `NewPipeExtractor v0.26.0`, Audius API, LRCLIB API |
 | **Testing** | JUnit 4, Robolectric `4.16.1`, Kotlinx Coroutines Test `1.10.2`, Compose UI Test |
 
 ---

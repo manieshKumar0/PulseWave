@@ -72,10 +72,15 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -90,6 +95,7 @@ import com.example.data.model.SonicDnaProfile
 import com.example.data.model.SoundscapePreset
 import com.example.data.model.Track
 import com.example.data.model.UserProfile
+import com.example.data.remote.YouTubeMusicClient
 import com.example.media.PlaybackUiState
 import com.example.ui.components.BeatReactiveLyricState
 import com.example.ui.components.BeatReactiveWaveformCanvas
@@ -124,6 +130,8 @@ fun NowPlayingScreen(
     knownUsers: List<UserProfile> = emptyList(),
     defaultRoomName: String = "My Listening Room",
     onRequestSignIn: (String) -> Unit = {},
+    onConnectYouTube: () -> Unit = {},
+    onRetryPlayback: () -> Unit = {},
     onOpenPulseRoom: (PulseRoomDoc) -> Unit = {},
     onClose: () -> Unit,
     onTogglePlayPause: () -> Unit,
@@ -267,7 +275,9 @@ fun NowPlayingScreen(
                 onToggleShuffle = onToggleShuffle,
                 onCycleRepeat = onCycleRepeat,
                 onToggleLike = { onToggleLike(track) },
-                onDownloadClick = { onDownloadClick(track) }
+                onDownloadClick = { onDownloadClick(track) },
+                onConnectYouTube = onConnectYouTube,
+                onRetryPlayback = onRetryPlayback
             )
             1 -> LyricCanvasTab(
                 track = track,
@@ -349,7 +359,9 @@ private fun PlayerTab(
     onToggleShuffle: () -> Unit,
     onCycleRepeat: () -> Unit,
     onToggleLike: () -> Unit,
-    onDownloadClick: () -> Unit
+    onDownloadClick: () -> Unit,
+    onConnectYouTube: () -> Unit,
+    onRetryPlayback: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -403,28 +415,60 @@ private fun PlayerTab(
                     )
                 }
 
+                val haptics = LocalHapticFeedback.current
+                val likeScale by animateFloatAsState(
+                    targetValue = if (track.isLiked) 1.16f else 1.0f,
+                    animationSpec = spring(dampingRatio = 0.45f, stiffness = 500f),
+                    label = "now_playing_like_scale"
+                )
+
                 Row {
                     IconButton(
-                        onClick = onToggleLike,
+                        onClick = {
+                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onToggleLike()
+                        },
                         modifier = Modifier.minimumInteractiveComponentSize().testTag("now_playing_like_button")
                     ) {
                         Icon(
                             imageVector = if (track.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                            contentDescription = "Like track",
-                            tint = if (track.isLiked) CoralWave else MaterialTheme.colorScheme.onSurfaceVariant
+                            contentDescription = if (track.isLiked) "Unlike track" else "Like track",
+                            tint = if (track.isLiked) CoralWave else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.graphicsLayer {
+                                scaleX = likeScale
+                                scaleY = likeScale
+                            }
                         )
                     }
-                    if (track.streamUrl.isNotBlank()) {
+                    if (track.canDownloadOffline || track.isDownloaded) {
                         IconButton(
-                            onClick = onDownloadClick,
+                            onClick = {
+                                if (downloadProgress == null) {
+                                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    onDownloadClick()
+                                }
+                            },
                             modifier = Modifier.minimumInteractiveComponentSize().testTag("now_playing_download_button")
                         ) {
                             when {
-                                downloadProgress != null -> CircularProgressIndicator(
-                                    progress = { downloadProgress },
+                                downloadProgress != null && downloadProgress < 0.08f -> CircularProgressIndicator(
                                     modifier = Modifier.size(22.dp),
-                                    strokeWidth = 2.dp
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary
                                 )
+                                downloadProgress != null -> {
+                                    val animatedProgress by animateFloatAsState(
+                                        targetValue = downloadProgress.coerceIn(0f, 1f),
+                                        animationSpec = spring(stiffness = 300f),
+                                        label = "now_playing_download_progress"
+                                    )
+                                    CircularProgressIndicator(
+                                        progress = { animatedProgress },
+                                        modifier = Modifier.size(22.dp),
+                                        strokeWidth = 2.4.dp,
+                                        color = MintElectric
+                                    )
+                                }
                                 track.isDownloaded -> Icon(
                                     imageVector = Icons.Rounded.DownloadDone,
                                     contentDescription = "Remove offline download",
@@ -439,11 +483,45 @@ private fun PlayerTab(
         }
 
         if (playbackState.playbackError != null) {
-            Text(
-                text = playbackState.playbackError,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.error
-            )
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = playbackState.playbackError,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error
+                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (YouTubeMusicClient.isYouTubeSignInSuggestionError(playbackState.playbackError)) {
+                        Button(
+                            onClick = onConnectYouTube,
+                            modifier = Modifier
+                                .height(48.dp)
+                                .testTag("now_playing_connect_youtube_button")
+                        ) {
+                            Text("Connect YouTube")
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = onRetryPlayback,
+                        modifier = Modifier
+                            .height(48.dp)
+                            .testTag("now_playing_retry_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Refresh,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Retry")
+                    }
+                }
+            }
         }
 
         val duration = playbackState.durationMs.coerceAtLeast(1L)

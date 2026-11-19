@@ -1,3 +1,11 @@
 <resources>
     <string name="app_name">PulseWave</string>
+    <string name="device_songs_summary">%1$d songs longer than 2 min</string>
+    <string name="device_songs_scanning">Scanning device songs…</string>
+    <string name="device_songs_rescan">Rescan</string>
+    <string name="device_permission_title">Load songs from your device</string>
+    <string name="device_permission_body">Allow audio access so PulseWave can automatically list all MP3 and music files longer than 2 minutes from your phone.</string>
+    <string name="device_permission_cta">Allow Audio Access</string>
+    <string name="device_empty_title">No songs longer than 2 minutes found</string>
+    <string name="device_empty_body">MP3 and audio tracks longer than 2 minutes stored on your phone will appear here automatically.</string>
 </resources>

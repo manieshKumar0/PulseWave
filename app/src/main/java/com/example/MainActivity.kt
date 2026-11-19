@@ -77,6 +77,7 @@ import com.example.data.model.UserProfile
 import com.example.data.remote.AudiusCatalogClient
 import com.example.data.remote.LrclibClient
 import com.example.data.remote.OfflineDownloadManager
+import com.example.data.remote.YouTubeMusicClient
 import com.example.domain.RecommendationEngine
 import com.example.domain.SafMusicImporter
 import com.example.media.PlaybackController
@@ -84,6 +85,7 @@ import com.example.ui.components.GoogleSignInRequiredDialog
 import com.example.ui.components.MiniPlayerBar
 import com.example.ui.components.PulseWaveBrandLogo
 import com.example.ui.components.ShareMusicSheet
+import com.example.ui.components.YouTubeSignInDialog
 import com.example.ui.components.defaultPulseRoomName
 import com.example.ui.components.dynamicAmbientGlow
 import com.example.ui.screens.AuthScreen
@@ -184,11 +186,23 @@ private fun AuthenticatedPulseApp(
                 val prefs = PreferencesRepository(appContext)
                 val lrclib = LrclibClient()
                 val audius = AudiusCatalogClient()
-                val downloader = OfflineDownloadManager(appContext, libraryRepo, lrclib)
+                val youtube = YouTubeMusicClient.shared
+                val downloader = OfflineDownloadManager(appContext, libraryRepo, lrclib, youtube)
                 val saf = SafMusicImporter(appContext)
                 val engine = RecommendationEngine()
                 val controller = PlaybackController(appContext, db.signalDao())
-                PulseViewModel(appContext, libraryRepo, prefs, audius, lrclib, downloader, saf, engine, controller)
+                PulseViewModel(
+                    appContext = appContext,
+                    libraryRepo = libraryRepo,
+                    prefsRepo = prefs,
+                    audiusClient = audius,
+                    lrclibClient = lrclib,
+                    downloadManager = downloader,
+                    safImporter = saf,
+                    recommendationEngine = engine,
+                    playbackController = controller,
+                    youTubeClient = youtube
+                )
             }
         }
     )
@@ -220,6 +234,7 @@ private fun AuthenticatedPulseApp(
     val parsedLyrics by pulseViewModel.parsedLyrics.collectAsStateWithLifecycle()
     val isLoadingLyrics by pulseViewModel.isLoadingLyrics.collectAsStateWithLifecycle()
     val isSyncingLocalLyrics by pulseViewModel.isSyncingLocalLyrics.collectAsStateWithLifecycle()
+    val isScanningDeviceMusic by pulseViewModel.isScanningDeviceMusic.collectAsStateWithLifecycle()
     val aiTrackStory by pulseViewModel.aiTrackStory.collectAsStateWithLifecycle()
     val albumAccent by pulseViewModel.albumAccent.collectAsStateWithLifecycle()
     val offlineCacheSummary by pulseViewModel.offlineCacheSummary.collectAsStateWithLifecycle()
@@ -258,6 +273,7 @@ private fun AuthenticatedPulseApp(
     var shareTargetTrack by remember { mutableStateOf<Track?>(null) }
     var isSigningIn by remember { mutableStateOf(false) }
     var pendingSignInFeature by remember { mutableStateOf<String?>(null) }
+    var showYouTubeSignInDialog by remember { mutableStateOf(false) }
 
     fun triggerGoogleSignIn() {
         if (isSigningIn) return
@@ -480,9 +496,11 @@ private fun AuthenticatedPulseApp(
                                     offlineMode = settings.offlineMode,
                                     playlistsState = playlistsState,
                                     syncedLibraryState = syncedLibraryState,
+                                    isScanningDeviceMusic = isScanningDeviceMusic,
                                     isSignedIn = isSignedIn,
                                     isSigningIn = isSigningIn,
                                     onSignInWithGoogle = { triggerGoogleSignIn() },
+                                    onScanDeviceAudio = { silent -> pulseViewModel.scanDeviceAudioTracks(silent) },
                                     onSearchQuery = { pulseViewModel.searchTracks(it) },
                                     onPlayTrack = { track, queue ->
                                         pulseViewModel.playTrack(track, queue)
@@ -545,6 +563,8 @@ private fun AuthenticatedPulseApp(
                                     onImportSafAudio = { uris, isCloud -> pulseViewModel.importSafAudio(uris, isCloud) },
                                     onSyncLocalLyrics = { pulseViewModel.syncLocalTracksMetadataAndLyrics() },
                                     onClearMetadataCache = { pulseViewModel.clearMetadataCache() },
+                                    onConnectYouTube = { showYouTubeSignInDialog = true },
+                                    onDisconnectYouTube = { pulseViewModel.disconnectYouTubeSession() },
                                     onSignOut = {
                                         signOutUser(credentialManager, scope, onSignOutComplete = onSignOutComplete)
                                     }
@@ -694,6 +714,8 @@ private fun AuthenticatedPulseApp(
                     knownUsers = allUsers,
                     defaultRoomName = defaultRoomName,
                     onRequestSignIn = { feature -> pendingSignInFeature = feature },
+                    onConnectYouTube = { showYouTubeSignInDialog = true },
+                    onRetryPlayback = { pulseViewModel.playbackController.retryActiveTrack() },
                     onOpenPulseRoom = { room ->
                         showNowPlaying = false
                         socialViewModel?.observePulseRoomSession(room.id)
@@ -794,6 +816,16 @@ private fun AuthenticatedPulseApp(
                     isSigningIn = isSigningIn,
                     onDismiss = { pendingSignInFeature = null },
                     onSignInWithGoogle = { triggerGoogleSignIn() }
+                )
+            }
+
+            if (showYouTubeSignInDialog) {
+                YouTubeSignInDialog(
+                    onDismiss = { showYouTubeSignInDialog = false },
+                    onSessionCaptured = { cookie, visitorData, label ->
+                        showYouTubeSignInDialog = false
+                        pulseViewModel.saveYouTubeSession(cookie, visitorData, label)
+                    }
                 )
             }
         }

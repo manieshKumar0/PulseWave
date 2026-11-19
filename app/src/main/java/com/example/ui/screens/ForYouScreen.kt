@@ -228,7 +228,7 @@ fun ForYouScreen(
                         OutlinedTextField(
                             value = customDjPrompt,
                             onValueChange = { customDjPrompt = it },
-                            placeholder = { Text("Ask AI DJ (e.g. midnight cyber drive)") },
+                            placeholder = { Text("Ask AI DJ (e.g. Arijit Singh, midnight drive)") },
                             singleLine = true,
                             modifier = Modifier
                                 .weight(1f)

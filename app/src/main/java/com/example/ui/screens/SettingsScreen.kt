@@ -116,6 +116,8 @@ fun SettingsScreen(
     onImportSafAudio: (List<Uri>, Boolean) -> Unit,
     onSyncLocalLyrics: () -> Unit = {},
     onClearMetadataCache: () -> Unit = {},
+    onConnectYouTube: () -> Unit = {},
+    onDisconnectYouTube: () -> Unit = {},
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -359,6 +361,60 @@ fun SettingsScreen(
                             onCheckedChange = onToggleHighResStreaming,
                             modifier = Modifier.testTag("high_res_streaming_switch")
                         )
+                    }
+
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.CloudSync,
+                                contentDescription = null,
+                                tint = if (settings.isYouTubeConnected) MintElectric else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Column {
+                                Text("YouTube Playback Session", style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    text = if (settings.isYouTubeConnected) {
+                                        settings.youtubeAccountLabel.ifBlank { "Connected · passes YouTube bot checks" }
+                                    } else {
+                                        "Optional sign-in if mobile/Wi-Fi IP hits bot check"
+                                    },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        if (settings.isYouTubeConnected) {
+                            OutlinedButton(
+                                onClick = onDisconnectYouTube,
+                                modifier = Modifier
+                                    .height(48.dp)
+                                    .testTag("disconnect_youtube_button")
+                            ) {
+                                Text("Disconnect", maxLines = 1)
+                            }
+                        } else {
+                            Button(
+                                onClick = onConnectYouTube,
+                                modifier = Modifier
+                                    .height(48.dp)
+                                    .testTag("connect_youtube_button")
+                            ) {
+                                Text("Connect", maxLines = 1)
+                            }
+                        }
                     }
 
                     HorizontalDivider(

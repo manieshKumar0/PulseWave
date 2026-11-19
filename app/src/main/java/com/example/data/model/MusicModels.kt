@@ -3,6 +3,7 @@ package com.example.data.model
 import androidx.compose.runtime.Immutable
 
 enum class TrackSourceType(val label: String) {
+    YOUTUBE("YouTube Music"),
     STREAM("Stream"),
     CURATED("Curated"),
     LOCAL_SAF("Device"),
@@ -32,6 +33,30 @@ data class Track(
     val playCount: Int = 0,
     val lastPlayedAt: Long = 0L
 ) {
+    companion object {
+        const val YOUTUBE_ID_PREFIX = "yt_"
+        const val YOUTUBE_URI_SCHEME = "pulseyt"
+    }
+
+    val youtubeVideoId: String?
+        get() = when {
+            id.startsWith(YOUTUBE_ID_PREFIX) -> id.removePrefix(YOUTUBE_ID_PREFIX).takeIf { it.isNotBlank() }
+            streamUrl.startsWith("$YOUTUBE_URI_SCHEME://") -> {
+                val queryMatch = Regex("[?&]v=([A-Za-z0-9_-]{6,})").find(streamUrl)?.groupValues?.getOrNull(1)
+                queryMatch ?: streamUrl.removePrefix("$YOUTUBE_URI_SCHEME://").substringBefore('?').trim('/').takeIf { it.isNotBlank() }
+            }
+            else -> null
+        }
+
+    val isYouTubeTrack: Boolean
+        get() = sourceType == TrackSourceType.YOUTUBE || youtubeVideoId != null
+
+    val canDownloadOffline: Boolean
+        get() = !isDownloaded &&
+            sourceType != TrackSourceType.LOCAL_SAF &&
+            sourceType != TrackSourceType.CLOUD_SAF &&
+            (streamUrl.startsWith("http", ignoreCase = true) || isYouTubeTrack)
+
     val trackKey: String
         get() = "${title.lowercase().replace(Regex("[^a-z0-9]+"), "_")}_${artist.lowercase().replace(Regex("[^a-z0-9]+"), "_")}"
             .trim('_')
@@ -42,6 +67,8 @@ data class Track(
         get() = when {
             isDownloaded && downloadedFilePath.isNotBlank() -> "file://$downloadedFilePath"
             localUri.isNotBlank() -> localUri
+            streamUrl.startsWith("http", ignoreCase = true) -> streamUrl
+            youtubeVideoId != null -> "$YOUTUBE_URI_SCHEME://watch?v=$youtubeVideoId"
             else -> streamUrl
         }
 

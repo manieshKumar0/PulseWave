@@ -71,7 +71,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -443,28 +446,64 @@ fun TrackRowItem(
                 }
             }
 
+            val haptics = LocalHapticFeedback.current
+            val likeScale by animateFloatAsState(
+                targetValue = if (track.isLiked) 1.15f else 1.0f,
+                animationSpec = spring(dampingRatio = 0.45f, stiffness = 500f),
+                label = "row_like_scale"
+            )
+
             IconButton(
-                onClick = onToggleLike,
-                modifier = Modifier.minimumInteractiveComponentSize()
+                onClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    onToggleLike()
+                },
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .testTag("track_like_${track.id}")
             ) {
                 Icon(
                     imageVector = if (track.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                    contentDescription = "Like track",
-                    tint = if (track.isLiked) CoralWave else MaterialTheme.colorScheme.onSurfaceVariant
+                    contentDescription = if (track.isLiked) "Unlike track" else "Like track",
+                    tint = if (track.isLiked) CoralWave else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.graphicsLayer {
+                        scaleX = likeScale
+                        scaleY = likeScale
+                    }
                 )
             }
 
-            if (track.streamUrl.isNotBlank()) {
+            if (track.canDownloadOffline || track.isDownloaded) {
                 IconButton(
-                    onClick = onDownloadClick,
-                    modifier = Modifier.minimumInteractiveComponentSize()
+                    onClick = {
+                        if (downloadProgress == null) {
+                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onDownloadClick()
+                        }
+                    },
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .testTag("track_download_${track.id}")
                 ) {
                     when {
-                        downloadProgress != null -> CircularProgressIndicator(
-                            progress = { downloadProgress },
+                        downloadProgress != null && downloadProgress < 0.08f -> CircularProgressIndicator(
                             modifier = Modifier.size(20.dp),
-                            strokeWidth = 2.dp
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary
                         )
+                        downloadProgress != null -> {
+                            val animatedProgress by animateFloatAsState(
+                                targetValue = downloadProgress.coerceIn(0f, 1f),
+                                animationSpec = spring(stiffness = 300f),
+                                label = "row_download_progress"
+                            )
+                            CircularProgressIndicator(
+                                progress = { animatedProgress },
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.2.dp,
+                                color = MintElectric
+                            )
+                        }
                         track.isDownloaded -> Icon(
                             imageVector = Icons.Rounded.DownloadDone,
                             contentDescription = "Remove offline download",

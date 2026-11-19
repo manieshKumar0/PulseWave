@@ -1,5 +1,11 @@
 package com.example.ui.screens
 
+import android.app.Activity
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,7 +27,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.ThumbUp
 import androidx.compose.material3.AlertDialog
@@ -38,6 +47,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -46,15 +56,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.app.ActivityCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.R
 import com.example.data.model.CollaborativePlaylistDoc
 import com.example.data.model.SyncedTrackDoc
 import com.example.data.model.Track
 import com.example.data.model.TrackSourceType
+import com.example.domain.SafMusicImporter
 import com.example.ui.components.GoogleSignInGateCard
 import com.example.ui.components.ObsidianGlassCard
 import com.example.ui.components.PulseWaveBrandLogo
@@ -80,9 +97,11 @@ fun LibraryScreen(
     offlineMode: Boolean,
     playlistsState: UiState<List<CollaborativePlaylistDoc>>,
     syncedLibraryState: UiState<List<SyncedTrackDoc>>,
+    isScanningDeviceMusic: Boolean = false,
     isSignedIn: Boolean = true,
     isSigningIn: Boolean = false,
     onSignInWithGoogle: () -> Unit = {},
+    onScanDeviceAudio: (silentIfNoPermission: Boolean) -> Unit = {},
     onSearchQuery: (String) -> Unit,
     onPlayTrack: (Track, List<Track>) -> Unit,
     onToggleLike: (Track) -> Unit,
@@ -93,16 +112,56 @@ fun LibraryScreen(
     onUpvotePlaylistTrack: (CollaborativePlaylistDoc, String) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val requiredAudioPermission = remember { SafMusicImporter.requiredDeviceAudioPermission() }
+    var hasAudioPermission by remember {
+        mutableStateOf(SafMusicImporter.hasDeviceAudioPermission(context))
+    }
+    var permissionRequestedOnce by remember { mutableStateOf(false) }
+
+    val audioPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        permissionRequestedOnce = true
+        val permitted = granted || SafMusicImporter.hasDeviceAudioPermission(context)
+        hasAudioPermission = permitted
+        if (permitted) {
+            onScanDeviceAudio(false)
+        }
+    }
+
     var searchQuery by remember { mutableStateOf("") }
     var selectedFilter by remember { mutableStateOf(LibraryFilter.ALL) }
     var showCreatePlaylistDialog by remember { mutableStateOf(false) }
 
+    DisposableEffect(lifecycleOwner, selectedFilter) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                val permitted = SafMusicImporter.hasDeviceAudioPermission(context)
+                hasAudioPermission = permitted
+                if (permitted && selectedFilter == LibraryFilter.DEVICE) {
+                    onScanDeviceAudio(true)
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     val filteredTracks = remember(tracks, searchResults, searchQuery, selectedFilter) {
         val base = if (searchQuery.isNotBlank()) searchResults else tracks
         when (selectedFilter) {
-            LibraryFilter.ALL -> base
+            LibraryFilter.ALL -> base.filter {
+                it.sourceType != TrackSourceType.LOCAL_SAF &&
+                    it.sourceType != TrackSourceType.CLOUD_SAF
+            }
             LibraryFilter.DOWNLOADED -> base.filter { it.isDownloaded }
-            LibraryFilter.DEVICE -> base.filter { it.sourceType == TrackSourceType.LOCAL_SAF }
+            LibraryFilter.DEVICE -> base.filter {
+                it.sourceType == TrackSourceType.LOCAL_SAF &&
+                    (!it.id.startsWith(SafMusicImporter.DEVICE_TRACK_ID_PREFIX) ||
+                        it.durationMs > SafMusicImporter.DEFAULT_MIN_DURATION_MS)
+            }
             LibraryFilter.CLOUD_DRIVE -> base.filter { it.sourceType == TrackSourceType.CLOUD_SAF }
             LibraryFilter.SHARED_PLAYLISTS -> emptyList()
         }
@@ -147,7 +206,7 @@ fun LibraryScreen(
                     searchQuery = it
                     onSearchQuery(it)
                 },
-                placeholder = { Text("Search library, Audius tracks, artists, genres") },
+                placeholder = { Text("Search any song, artist, or YouTube link") },
                 leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
                 trailingIcon = {
                     if (isSearching) {
@@ -175,7 +234,18 @@ fun LibraryScreen(
                 items(LibraryFilter.entries) { filter ->
                     FilterChip(
                         selected = selectedFilter == filter,
-                        onClick = { selectedFilter = filter },
+                        onClick = {
+                            selectedFilter = filter
+                            if (filter == LibraryFilter.DEVICE) {
+                                val permitted = SafMusicImporter.hasDeviceAudioPermission(context)
+                                hasAudioPermission = permitted
+                                if (permitted) {
+                                    onScanDeviceAudio(true)
+                                } else {
+                                    audioPermissionLauncher.launch(requiredAudioPermission)
+                                }
+                            }
+                        },
                         label = { Text(filter.label) },
                         modifier = Modifier.testTag("library_filter_${filter.name.lowercase()}")
                     )
@@ -289,29 +359,194 @@ fun LibraryScreen(
             }
             }
         } else {
+            if (selectedFilter == LibraryFilter.DEVICE && (hasAudioPermission || filteredTracks.isNotEmpty())) {
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (isScanningDeviceMusic) {
+                                    stringResource(R.string.device_songs_scanning)
+                                } else {
+                                    stringResource(R.string.device_songs_summary, filteredTracks.size)
+                                },
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                if (SafMusicImporter.hasDeviceAudioPermission(context)) {
+                                    onScanDeviceAudio(false)
+                                } else {
+                                    audioPermissionLauncher.launch(requiredAudioPermission)
+                                }
+                            },
+                            enabled = !isScanningDeviceMusic,
+                            modifier = Modifier
+                                .height(48.dp)
+                                .testTag("rescan_device_audio_button")
+                        ) {
+                            if (isScanningDeviceMusic) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.Refresh,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            Spacer(Modifier.width(6.dp))
+                            Text(stringResource(R.string.device_songs_rescan))
+                        }
+                    }
+                }
+            }
+
             if (filteredTracks.isEmpty()) {
                 item {
-                    ObsidianGlassCard(modifier = Modifier.fillMaxWidth()) {
-                        Column(
-                            modifier = Modifier.padding(20.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Image(
-                                painter = painterResource(id = R.drawable.img_empty_library),
-                                contentDescription = "Empty library artwork",
-                                contentScale = ContentScale.Crop,
+                    if (selectedFilter == LibraryFilter.DEVICE && isScanningDeviceMusic) {
+                        ObsidianGlassCard(modifier = Modifier.fillMaxWidth()) {
+                            Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(150.dp)
-                                    .clip(RoundedCornerShape(16.dp))
-                            )
-                            Text("No tracks match this view", style = MaterialTheme.typography.titleLarge)
-                            Text(
-                                text = "Import audio from your device or Cloud Drive in Settings, or download streaming tracks for offline access.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                                    .padding(24.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                CircularProgressIndicator()
+                                Text(
+                                    text = stringResource(R.string.device_songs_scanning),
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                            }
+                        }
+                    } else if (selectedFilter == LibraryFilter.DEVICE && !hasAudioPermission) {
+                        val activity = context as? Activity
+                        val showSettingsHint = permissionRequestedOnce &&
+                            activity != null &&
+                            !ActivityCompat.shouldShowRequestPermissionRationale(activity, requiredAudioPermission)
+                        ObsidianGlassCard(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(20.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.LibraryMusic,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(40.dp)
+                                )
+                                Text(
+                                    text = stringResource(R.string.device_permission_title),
+                                    style = MaterialTheme.typography.titleLarge
+                                )
+                                Text(
+                                    text = stringResource(R.string.device_permission_body),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Button(
+                                    onClick = {
+                                        if (showSettingsHint) {
+                                            val settingsIntent = Intent(
+                                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                                Uri.fromParts("package", context.packageName, null)
+                                            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            context.startActivity(settingsIntent)
+                                        } else {
+                                            audioPermissionLauncher.launch(requiredAudioPermission)
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .height(48.dp)
+                                        .testTag("grant_device_audio_permission_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.FolderOpen,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        if (showSettingsHint) "Open App Permissions"
+                                        else stringResource(R.string.device_permission_cta)
+                                    )
+                                }
+                            }
+                        }
+                    } else if (selectedFilter == LibraryFilter.DEVICE) {
+                        ObsidianGlassCard(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(20.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Image(
+                                    painter = painterResource(id = R.drawable.img_empty_library),
+                                    contentDescription = "Empty library artwork",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(150.dp)
+                                        .clip(RoundedCornerShape(16.dp))
+                                )
+                                Text(
+                                    text = stringResource(R.string.device_empty_title),
+                                    style = MaterialTheme.typography.titleLarge
+                                )
+                                Text(
+                                    text = stringResource(R.string.device_empty_body),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    } else {
+                        ObsidianGlassCard(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier.padding(20.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Image(
+                                    painter = painterResource(id = R.drawable.img_empty_library),
+                                    contentDescription = "Empty library artwork",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(150.dp)
+                                        .clip(RoundedCornerShape(16.dp))
+                                )
+                                Text(
+                                    text = when (selectedFilter) {
+                                        LibraryFilter.DOWNLOADED -> "No downloaded songs yet"
+                                        LibraryFilter.ALL -> "No online tracks match this view"
+                                        else -> "No tracks match this view"
+                                    },
+                                    style = MaterialTheme.typography.titleLarge
+                                )
+                                Text(
+                                    text = when (selectedFilter) {
+                                        LibraryFilter.DOWNLOADED -> "Tap the download button on any online song to save it here for offline playback."
+                                        LibraryFilter.ALL -> "Search for any song above or play tracks from For You to populate your online library."
+                                        else -> "Import audio from your Cloud Drive in Settings, or switch to Device to browse local songs."
+                                    },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                     }
                 }

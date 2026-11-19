@@ -7,6 +7,7 @@ import com.example.data.model.FeedPostDoc
 import com.example.data.model.RecommendedPick
 import com.example.data.model.SonicDnaProfile
 import com.example.data.model.Track
+import com.example.data.model.TrackSourceType
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.Schema
@@ -184,8 +185,9 @@ class RecommendationEngine {
                 (track.mood.contains(moodFilter, true) || track.genre.contains(moodFilter, true) || track.title.contains(moodFilter, true))
             ) 5.5 else 0.0
             val likeBoost = if (track.isLiked) 1.4 else 0.0
+            val ytDiscoveryBoost = if (track.sourceType == TrackSourceType.YOUTUBE && skipPenalty == 0.0) 1.6 else 0.0
 
-            val total = (gScore + mScore + bpmFit + replayBonus + friendBoost + timeFit + moodPromptBoost + likeBoost - skipPenalty)
+            val total = (gScore + mScore + bpmFit + replayBonus + friendBoost + timeFit + moodPromptBoost + likeBoost + ytDiscoveryBoost - skipPenalty)
                 .coerceAtLeast(0.2)
 
             val (category, tag, reason) = when {
@@ -254,9 +256,11 @@ class RecommendationEngine {
         }
 
         return try {
-            val shortlist = stage1.take(18)
+            val ytShortlist = stage1.filter { it.track.sourceType == TrackSourceType.YOUTUBE }.take(12)
+            val nonYtShortlist = stage1.filter { it.track.sourceType != TrackSourceType.YOUTUBE }.take(12)
+            val shortlist = (ytShortlist + nonYtShortlist + stage1).distinctBy { it.track.id }.take(24)
             val candidateLines = shortlist.joinToString("\n") { p ->
-                "- id=${p.track.id} | title=${p.track.title} | artist=${p.track.artist} | genre=${p.track.genre} | mood=${p.track.mood} | bpm=${p.track.bpm} | stage1=${"%.1f".format(p.score)}"
+                "- id=${p.track.id} | title=${p.track.title} | artist=${p.track.artist} | source=${p.track.sourceType.label} | genre=${p.track.genre} | mood=${p.track.mood} | bpm=${p.track.bpm} | stage1=${"%.1f".format(p.score)}"
             }
             val skippedGenres = signals.filter { it.earlySkip }.map { it.genre }.distinct().take(4).joinToString()
             val prompt = buildString {
@@ -356,10 +360,18 @@ class RecommendationEngine {
         subheadline: String,
         poweredByGemini: Boolean
     ): DiscoveryFeedBundle {
-        val hero = picks.take(6)
+        val ytPicks = picks.filter { it.track.sourceType == TrackSourceType.YOUTUBE }
+        val nonYtPicks = picks.filter { it.track.sourceType != TrackSourceType.YOUTUBE }
+        val hero = if (ytPicks.isNotEmpty() && nonYtPicks.isNotEmpty()) {
+            // Blend YouTube Music and local/Audius picks in Top Personalized Picks
+            (ytPicks.take(3) + nonYtPicks.take(3) + picks).distinctBy { it.track.id }.take(6)
+        } else {
+            picks.take(6)
+        }
+        val heroIds = hero.mapTo(HashSet()) { it.track.id }
         val replays = picks.filter { it.category == "Replay Radar" }.ifEmpty { picks.drop(2).take(5) }
         val friends = picks.filter { it.category == "Friend Wave" }.ifEmpty { picks.drop(4).take(5) }
-        val explore = picks.drop(6).ifEmpty { picks }
+        val explore = picks.filter { it.track.id !in heroIds }.ifEmpty { picks }
         return DiscoveryFeedBundle(
             djHeadline = headline,
             djSubheadline = subheadline,

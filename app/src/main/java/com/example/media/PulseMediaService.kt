@@ -5,6 +5,7 @@ import android.content.Intent
 import android.media.audiofx.BassBoost
 import android.media.audiofx.Equalizer
 import android.media.audiofx.PresetReverb
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import androidx.annotation.OptIn
@@ -12,7 +13,12 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.ResolvingDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.CommandButton
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -20,8 +26,12 @@ import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
 import com.example.MainActivity
 import com.example.data.model.DefaultSoundscapes
+import com.example.data.model.Track
+import com.example.data.remote.YouTubeMusicClient
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import kotlinx.coroutines.runBlocking
+import java.io.IOException
 
 class PulseMediaService : MediaSessionService() {
 
@@ -54,7 +64,51 @@ class PulseMediaService : MediaSessionService() {
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build()
 
+        // Share YouTubeMusicClient's IPv4-preferred OkHttpClient (same IP stack, TLS, connection pool, and per-URL User-Agent interceptor)
+        val okHttpDataSourceFactory = OkHttpDataSource.Factory(YouTubeMusicClient.shared.playbackOkHttpClient)
+
+        val upstreamFactory = DefaultDataSource.Factory(this, okHttpDataSourceFactory)
+
+        val resolvingDataSourceFactory = ResolvingDataSource.Factory(upstreamFactory) { dataSpec ->
+            val uri = dataSpec.uri
+            if (uri.scheme == Track.YOUTUBE_URI_SCHEME) {
+                val videoId = YouTubeMusicClient.extractVideoId(uri.toString())
+                    ?: throw IOException("Invalid YouTube track URI")
+                val resolved = runBlocking {
+                    YouTubeMusicClient.shared.resolveAudioStream(videoId)
+                }.getOrElse { err ->
+                    throw IOException(err.message ?: "YouTube audio stream unavailable", err)
+                }
+                dataSpec.buildUpon()
+                    .setUri(Uri.parse(resolved.url))
+                    .setHttpRequestHeaders(
+                        dataSpec.httpRequestHeaders + resolved.requestHeaders
+                    )
+                    .build()
+            } else {
+                dataSpec
+            }
+        }
+
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                /* minBufferMs = */ 30_000,
+                /* maxBufferMs = */ 90_000,
+                /* bufferForPlaybackMs = */ 350,
+                /* bufferForPlaybackAfterRebufferMs = */ 1_000
+            )
+            .setBackBuffer(
+                /* backBufferDurationMs = */ 30_000,
+                /* retainBackBufferFromKeyframe = */ false
+            )
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .build()
+
+        val mediaSourceFactory = DefaultMediaSourceFactory(resolvingDataSourceFactory)
+
         val exoPlayer = ExoPlayer.Builder(this)
+            .setMediaSourceFactory(mediaSourceFactory)
+            .setLoadControl(loadControl)
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
             .build()
