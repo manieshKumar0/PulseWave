@@ -1,9 +1,12 @@
 package com.example.ui.theme
 
 import androidx.compose.material3.Typography
+import androidx.compose.ui.text.ExperimentalTextApi
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import com.example.R
@@ -26,6 +29,40 @@ val JetBrainsMonoFontFamily = FontFamily(
     Font(R.font.jetbrains_mono, FontWeight.Normal),
     Font(R.font.jetbrains_mono, FontWeight.Medium),
     Font(R.font.jetbrains_mono, FontWeight.Bold)
+)
+
+@OptIn(ExperimentalTextApi::class)
+val PlayfairDisplayFontFamily = FontFamily(
+    Font(
+        resId = R.font.playfair_display,
+        weight = FontWeight.Normal,
+        style = FontStyle.Normal,
+        variationSettings = FontVariation.Settings(FontVariation.weight(400))
+    ),
+    Font(
+        resId = R.font.playfair_display,
+        weight = FontWeight.Medium,
+        style = FontStyle.Normal,
+        variationSettings = FontVariation.Settings(FontVariation.weight(500))
+    ),
+    Font(
+        resId = R.font.playfair_display,
+        weight = FontWeight.SemiBold,
+        style = FontStyle.Normal,
+        variationSettings = FontVariation.Settings(FontVariation.weight(600))
+    ),
+    Font(
+        resId = R.font.playfair_display,
+        weight = FontWeight.Bold,
+        style = FontStyle.Normal,
+        variationSettings = FontVariation.Settings(FontVariation.weight(700))
+    ),
+    Font(
+        resId = R.font.playfair_display,
+        weight = FontWeight.ExtraBold,
+        style = FontStyle.Normal,
+        variationSettings = FontVariation.Settings(FontVariation.weight(800))
+    )
 )
 
 val PulseWaveTypography = Typography(

@@ -2,12 +2,16 @@ package com.example.ui.screens
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -20,28 +24,21 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.AutoAwesome
-import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.GraphicEq
+import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,12 +47,21 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
 import com.example.R
 import com.example.data.model.DiscoveryFeedBundle
 import com.example.data.model.RecommendedPick
 import com.example.data.model.Track
+import com.example.data.model.TrackSourceType
+import com.example.ui.components.AskAiDjBanner
+import com.example.ui.components.MoodMixSpec
+import com.example.ui.components.MoodMixesCarouselCard
 import com.example.ui.components.ObsidianGlassCard
 import com.example.ui.components.PulseWaveBrandLogo
 import com.example.ui.components.TrackArtworkThumb
@@ -68,9 +74,13 @@ import com.example.ui.viewmodel.UiState
 fun ForYouScreen(
     discoveryState: UiState<DiscoveryFeedBundle>,
     activeTrackId: String?,
+    isPlaying: Boolean,
+    activeMoodMix: String?,
     downloadProgress: Map<String, Float>,
     offlineMode: Boolean,
     onRefreshWithMood: (String?) -> Unit,
+    onPlayMoodMix: (MoodMixSpec) -> Unit,
+    onAskAiDj: (String) -> Unit,
     onPlayTrack: (Track, List<Track>) -> Unit,
     onToggleLike: (Track) -> Unit,
     onDownloadClick: (Track) -> Unit,
@@ -78,10 +88,6 @@ fun ForYouScreen(
     onRecordDwell: (Track, Long) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val moodChips = listOf("Late Night Focus", "Energetic Drop", "Chill Ambient", "Euphoric Synth", "Acoustic Calm")
-    var selectedMood by remember { mutableStateOf<String?>(null) }
-    var customDjPrompt by remember { mutableStateOf("") }
-
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 140.dp),
@@ -112,142 +118,12 @@ fun ForYouScreen(
                     }
                 }
                 IconButton(
-                    onClick = { onRefreshWithMood(selectedMood) },
+                    onClick = { onRefreshWithMood(null) },
                     modifier = Modifier
                         .minimumInteractiveComponentSize()
                         .testTag("refresh_recommendations_button")
                 ) {
                     Icon(Icons.Rounded.Refresh, contentDescription = "Refresh recommendations")
-                }
-            }
-        }
-
-        // AI Mood DJ Banner
-        item {
-            ObsidianGlassCard(
-                modifier = Modifier.fillMaxWidth(),
-                cornerRadius = 24.dp,
-                accentTint = UltravioletPulse
-            ) {
-                Box(modifier = Modifier.fillMaxWidth()) {
-                    Image(
-                        painter = painterResource(id = R.drawable.img_sonic_dna_banner),
-                        contentDescription = "AI Mood DJ backdrop",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(140.dp)
-                    )
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(140.dp)
-                            .background(
-                                Brush.verticalGradient(
-                                    listOf(Color(0x55090B10), Color(0xEA090B10))
-                                )
-                            )
-                    )
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.AutoAwesome,
-                                contentDescription = null,
-                                tint = MintElectric,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Text(
-                                text = "AI MOOD DJ",
-                                style = MaterialTheme.typography.labelLarge,
-                                color = MintElectric
-                            )
-                            if (discoveryState is UiState.Success && discoveryState.data.poweredByGemini) {
-                                Surface(
-                                    color = UltravioletPulse.copy(alpha = 0.25f),
-                                    shape = RoundedCornerShape(8.dp)
-                                ) {
-                                    Text(
-                                        text = "Gemini Re-Ranked",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = Color.White,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                                    )
-                                }
-                            }
-                        }
-
-                        val headline = (discoveryState as? UiState.Success)?.data?.djHeadline
-                            ?: "Tuning your personalized wave..."
-                        val sub = (discoveryState as? UiState.Success)?.data?.djSubheadline
-                            ?: "Analyzing replays, completion rates, and time of day"
-
-                        Text(
-                            text = headline,
-                            style = MaterialTheme.typography.titleLarge,
-                            color = Color.White
-                        )
-                        Text(
-                            text = sub,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = Color(0xFFD1D5DB),
-                            maxLines = 2
-                        )
-                    }
-                }
-
-                Column(
-                    modifier = Modifier.padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(moodChips) { chip ->
-                            FilterChip(
-                                selected = selectedMood == chip,
-                                onClick = {
-                                    selectedMood = if (selectedMood == chip) null else chip
-                                    onRefreshWithMood(selectedMood)
-                                },
-                                label = { Text(chip) }
-                            )
-                        }
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedTextField(
-                            value = customDjPrompt,
-                            onValueChange = { customDjPrompt = it },
-                            placeholder = { Text("Ask AI DJ (e.g. Arijit Singh, midnight drive)") },
-                            singleLine = true,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("ai_dj_prompt_input")
-                        )
-                        Button(
-                            onClick = {
-                                if (customDjPrompt.isNotBlank()) {
-                                    selectedMood = customDjPrompt.trim()
-                                    onRefreshWithMood(selectedMood)
-                                }
-                            },
-                            modifier = Modifier
-                                .height(52.dp)
-                                .testTag("ai_dj_tune_button")
-                        ) {
-                            Icon(Icons.Rounded.Bolt, contentDescription = "Tune AI DJ")
-                        }
-                    }
                 }
             }
         }
@@ -282,7 +158,7 @@ fun ForYouScreen(
                         ) {
                             Text("Couldn't refresh feed", style = MaterialTheme.typography.titleMedium)
                             Text(discoveryState.message, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
-                            Button(onClick = { onRefreshWithMood(selectedMood) }) {
+                            Button(onClick = { onRefreshWithMood(null) }) {
                                 Text("Retry")
                             }
                         }
@@ -291,9 +167,17 @@ fun ForYouScreen(
             }
             is UiState.Success -> {
                 val bundle = discoveryState.data
-                val allQueue = (bundle.heroPicks + bundle.explorePicks).map { it.track }.distinctBy { it.id }
+                val allQueue = (bundle.heroPicks + bundle.replayPicks + bundle.explorePicks)
+                    .map { it.track }
+                    .distinctBy { it.id }
 
-                if (bundle.heroPicks.isEmpty()) {
+                val bentoTracks = bundle.youtubeLikedRecs
+                    .filter { it.sourceType == TrackSourceType.YOUTUBE }
+                    .ifEmpty { allQueue.filter { it.sourceType == TrackSourceType.YOUTUBE } }
+                    .distinctBy { it.id }
+                    .take(5)
+
+                if (bundle.heroPicks.isEmpty() && bentoTracks.isEmpty()) {
                     item {
                         ObsidianGlassCard(modifier = Modifier.fillMaxWidth()) {
                             Column(
@@ -320,11 +204,38 @@ fun ForYouScreen(
                         }
                     }
                 } else {
-                    item {
-                        Text(
-                            text = "Top Personalized Picks",
-                            style = MaterialTheme.typography.titleLarge
+                    if (bentoTracks.isNotEmpty()) {
+                        val bentoQueue = (bentoTracks + allQueue).distinctBy { it.id }
+                        item(key = "featured_bento_collage") {
+                            FeaturedBentoCollage(
+                                tracks = bentoTracks,
+                                activeTrackId = activeTrackId,
+                                onPlayTrack = { track -> onPlayTrack(track, bentoQueue) }
+                            )
+                        }
+                    }
+
+                    item(key = "ask_ai_dj_banner") {
+                        AskAiDjBanner(
+                            onSubmitPrompt = onAskAiDj
                         )
+                    }
+
+                    item(key = "mood_mixes_carousel") {
+                        MoodMixesCarouselCard(
+                            activeMoodName = activeMoodMix,
+                            isPlaying = isPlaying,
+                            onMixClick = onPlayMoodMix
+                        )
+                    }
+
+                    if (bundle.heroPicks.isNotEmpty()) {
+                        item {
+                            Text(
+                                text = "Top Personalized Picks",
+                                style = MaterialTheme.typography.titleLarge
+                            )
+                        }
                     }
 
                     item {
@@ -378,6 +289,283 @@ fun ForYouScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun FeaturedBentoCollage(
+    tracks: List<Track>,
+    activeTrackId: String?,
+    onPlayTrack: (Track) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val gap = 10.dp
+    BoxWithConstraints(
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("featured_bento_collage")
+    ) {
+        val totalHeight = (maxWidth * 0.82f).coerceIn(294.dp, 380.dp)
+
+        when (tracks.size) {
+            1 -> {
+                BentoTrackCard(
+                    track = tracks[0],
+                    index = 0,
+                    isActive = tracks[0].id == activeTrackId,
+                    onClick = { onPlayTrack(tracks[0]) },
+                    cornerRadius = 22.dp,
+                    innerPadding = 16.dp,
+                    titleSize = 21.sp,
+                    titleLineHeight = 24.sp,
+                    artistSize = 13.5.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(totalHeight * 0.68f)
+                )
+            }
+            2 -> {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(totalHeight * 0.72f),
+                    horizontalArrangement = Arrangement.spacedBy(gap)
+                ) {
+                    BentoTrackCard(
+                        track = tracks[0],
+                        index = 0,
+                        isActive = tracks[0].id == activeTrackId,
+                        onClick = { onPlayTrack(tracks[0]) },
+                        cornerRadius = 22.dp,
+                        innerPadding = 14.dp,
+                        titleSize = 20.sp,
+                        titleLineHeight = 23.sp,
+                        artistSize = 13.sp,
+                        modifier = Modifier
+                            .weight(0.60f)
+                            .fillMaxHeight()
+                    )
+                    BentoTrackCard(
+                        track = tracks[1],
+                        index = 1,
+                        isActive = tracks[1].id == activeTrackId,
+                        onClick = { onPlayTrack(tracks[1]) },
+                        cornerRadius = 20.dp,
+                        innerPadding = 12.dp,
+                        titleSize = 15.5.sp,
+                        titleLineHeight = 18.sp,
+                        artistSize = 12.sp,
+                        modifier = Modifier
+                            .weight(0.40f)
+                            .fillMaxHeight()
+                    )
+                }
+            }
+            else -> {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(totalHeight),
+                    horizontalArrangement = Arrangement.spacedBy(gap)
+                ) {
+                    // Left column: large top hero + 2 compact bottom squares (or 1 wide bottom card if only 4 tracks)
+                    Column(
+                        modifier = Modifier
+                            .weight(0.60f)
+                            .fillMaxHeight(),
+                        verticalArrangement = Arrangement.spacedBy(gap)
+                    ) {
+                        BentoTrackCard(
+                            track = tracks[0],
+                            index = 0,
+                            isActive = tracks[0].id == activeTrackId,
+                            onClick = { onPlayTrack(tracks[0]) },
+                            cornerRadius = 22.dp,
+                            innerPadding = 14.dp,
+                            titleSize = 20.sp,
+                            titleLineHeight = 23.sp,
+                            artistSize = 13.sp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(if (tracks.size == 3) 1f else 0.63f)
+                        )
+
+                        if (tracks.size >= 4) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(0.37f),
+                                horizontalArrangement = Arrangement.spacedBy(gap)
+                            ) {
+                                BentoTrackCard(
+                                    track = tracks[2],
+                                    index = 2,
+                                    isActive = tracks[2].id == activeTrackId,
+                                    onClick = { onPlayTrack(tracks[2]) },
+                                    cornerRadius = 16.dp,
+                                    innerPadding = 10.dp,
+                                    titleSize = 12.5.sp,
+                                    titleLineHeight = 14.5.sp,
+                                    artistSize = 10.5.sp,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight()
+                                )
+                                if (tracks.size >= 5) {
+                                    BentoTrackCard(
+                                        track = tracks[3],
+                                        index = 3,
+                                        isActive = tracks[3].id == activeTrackId,
+                                        onClick = { onPlayTrack(tracks[3]) },
+                                        cornerRadius = 16.dp,
+                                        innerPadding = 10.dp,
+                                        titleSize = 12.5.sp,
+                                        titleLineHeight = 14.5.sp,
+                                        artistSize = 10.5.sp,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .fillMaxHeight()
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Right column: compact landscape top + tall portrait bottom
+                    val tallRightTrack = if (tracks.size >= 5) tracks[4] else tracks.last()
+                    Column(
+                        modifier = Modifier
+                            .weight(0.40f)
+                            .fillMaxHeight(),
+                        verticalArrangement = Arrangement.spacedBy(gap)
+                    ) {
+                        BentoTrackCard(
+                            track = tracks[1],
+                            index = 1,
+                            isActive = tracks[1].id == activeTrackId,
+                            onClick = { onPlayTrack(tracks[1]) },
+                            cornerRadius = 20.dp,
+                            innerPadding = 12.dp,
+                            titleSize = 14.5.sp,
+                            titleLineHeight = 16.5.sp,
+                            artistSize = 11.5.sp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(0.37f)
+                        )
+                        BentoTrackCard(
+                            track = tallRightTrack,
+                            index = if (tracks.size >= 5) 4 else tracks.lastIndex,
+                            isActive = tallRightTrack.id == activeTrackId,
+                            onClick = { onPlayTrack(tallRightTrack) },
+                            cornerRadius = 20.dp,
+                            innerPadding = 12.dp,
+                            titleSize = 15.5.sp,
+                            titleLineHeight = 18.sp,
+                            artistSize = 12.sp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(0.63f)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BentoTrackCard(
+    track: Track,
+    index: Int,
+    isActive: Boolean,
+    onClick: () -> Unit,
+    cornerRadius: Dp,
+    innerPadding: Dp,
+    titleSize: TextUnit,
+    titleLineHeight: TextUnit,
+    artistSize: TextUnit,
+    modifier: Modifier = Modifier
+) {
+    val shape = RoundedCornerShape(cornerRadius)
+    Box(
+        modifier = modifier
+            .clip(shape)
+            .background(
+                Brush.linearGradient(
+                    listOf(
+                        MaterialTheme.colorScheme.surfaceVariant,
+                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f)
+                    )
+                )
+            )
+            .border(
+                width = if (isActive) 1.5.dp else 0.6.dp,
+                color = if (isActive) MintElectric else Color.White.copy(alpha = 0.09f),
+                shape = shape
+            )
+            .clickable(onClick = onClick)
+            .testTag("bento_track_card_$index")
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.MusicNote,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f),
+            modifier = Modifier
+                .align(Alignment.Center)
+                .size(28.dp)
+        )
+
+        val artUrl = track.displayArtworkUri
+        if (artUrl.isNotBlank()) {
+            AsyncImage(
+                model = artUrl,
+                contentDescription = "Play ${track.title} by ${track.artist}",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+
+        // Bottom contrast gradient scrim keeping upper artwork clear and bottom text legible
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        0.0f to Color.Transparent,
+                        0.40f to Color.Transparent,
+                        0.72f to Color(0x5A000000),
+                        1.0f to Color(0xD6000000)
+                    )
+                )
+        )
+
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .padding(innerPadding),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Text(
+                text = track.title,
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                fontSize = titleSize,
+                lineHeight = titleLineHeight,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = track.artist,
+                color = Color.White.copy(alpha = 0.88f),
+                fontWeight = FontWeight.Normal,
+                fontSize = artistSize,
+                lineHeight = artistSize * 1.2f,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }

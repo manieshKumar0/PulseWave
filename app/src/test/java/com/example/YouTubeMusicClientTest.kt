@@ -298,4 +298,95 @@ class YouTubeMusicClientTest {
         )
         assertFalse(YouTubeMusicClient.isYouTubeSignInSuggestionError("Network timeout"))
     }
+
+    @Test
+    fun buildLikedRecommendationQueries_seedsFromLikedSongsAndArtists() {
+        val liked = listOf(
+            Track(
+                id = "yt_NJAv_7lHUIU",
+                title = "Kesariya",
+                artist = "Arijit Singh",
+                genre = "Bollywood",
+                sourceType = TrackSourceType.YOUTUBE,
+                isLiked = true
+            ),
+            Track(
+                id = "audius_1",
+                title = "Blinding Lights",
+                artist = "The Weeknd",
+                genre = "Synthpop",
+                sourceType = TrackSourceType.STREAM,
+                isLiked = true
+            )
+        )
+        val queries = YouTubeMusicClient.buildLikedRecommendationQueries(
+            likedTracks = liked,
+            preferredGenres = listOf("Pop")
+        )
+        assertTrue(queries.any { it.contains("Arijit Singh", ignoreCase = true) })
+        assertTrue(queries.any { it.contains("The Weeknd", ignoreCase = true) })
+        assertTrue(queries.any { it.contains("Kesariya", ignoreCase = true) })
+    }
+
+    @Test
+    fun parseWebRemixNextJson_extractsPlaylistPanelTracksAsYouTubeOnly() {
+        val nextJson = """
+            {
+              "contents": {
+                "singleColumnMusicWatchNextResultsRenderer": {
+                  "tabbedRenderer": {
+                    "watchNextTabbedResultsRenderer": {
+                      "tabs": [
+                        {
+                          "tabRenderer": {
+                            "content": {
+                              "musicQueueRenderer": {
+                                "content": {
+                                  "playlistPanelRenderer": {
+                                    "contents": [
+                                      {
+                                        "playlistPanelVideoRenderer": {
+                                          "videoId": "4NRXx6U8ABQ",
+                                          "title": { "runs": [ { "text": "Blinding Lights" } ] },
+                                          "longBylineText": {
+                                            "runs": [
+                                              { "text": "The Weeknd" },
+                                              { "text": " • " },
+                                              { "text": "After Hours" }
+                                            ]
+                                          },
+                                          "lengthText": { "runs": [ { "text": "3:22" } ] },
+                                          "thumbnail": {
+                                            "thumbnails": [
+                                              { "url": "https://lh3.googleusercontent.com/weeknd=w120-h120-l90-rj" }
+                                            ]
+                                          }
+                                        }
+                                      }
+                                    ]
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+        """.trimIndent()
+
+        val tracks = YouTubeMusicClient.parseWebRemixNextJson(nextJson, "Liked Mix")
+        assertEquals(1, tracks.size)
+        val rec = tracks.first()
+        assertEquals("yt_4NRXx6U8ABQ", rec.id)
+        assertEquals("Blinding Lights", rec.title)
+        assertEquals("The Weeknd", rec.artist)
+        assertEquals("After Hours", rec.album)
+        assertEquals(202_000L, rec.durationMs)
+        assertEquals(TrackSourceType.YOUTUBE, rec.sourceType)
+        assertEquals("https://lh3.googleusercontent.com/weeknd=w544-h544-l90-rj", rec.artworkUrl)
+    }
 }

@@ -128,6 +128,7 @@ data class DiscoveryFeedBundle(
     val replayPicks: List<RecommendedPick> = emptyList(),
     val friendWavePicks: List<RecommendedPick> = emptyList(),
     val explorePicks: List<RecommendedPick> = emptyList(),
+    val youtubeLikedRecs: List<Track> = emptyList(),
     val sonicDna: SonicDnaProfile = SonicDnaProfile(),
     val poweredByGemini: Boolean = false
 )

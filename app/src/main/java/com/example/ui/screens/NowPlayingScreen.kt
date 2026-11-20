@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -82,10 +83,12 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.media3.common.Player
 import com.example.data.model.DefaultSoundscapes
 import com.example.data.model.LyricLine
@@ -110,6 +113,7 @@ import com.example.ui.components.dynamicAmbientGlow
 import com.example.ui.components.formatMillis
 import com.example.ui.theme.CoralWave
 import com.example.ui.theme.MintElectric
+import com.example.ui.theme.PlayfairDisplayFontFamily
 import com.example.ui.theme.UltravioletPulse
 import com.example.ui.viewmodel.UiState
 import kotlin.math.roundToInt
@@ -169,40 +173,48 @@ fun NowPlayingScreen(
             .safeDrawingPadding()
     ) {
         // Header bar
-        Row(
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+                .padding(horizontal = 8.dp, vertical = 6.dp)
         ) {
             IconButton(
                 onClick = onClose,
-                modifier = Modifier.minimumInteractiveComponentSize().testTag("collapse_now_playing")
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .minimumInteractiveComponentSize()
+                    .testTag("collapse_now_playing")
             ) {
                 Icon(Icons.Rounded.KeyboardArrowDown, contentDescription = "Collapse player")
             }
 
             Row(
+                modifier = Modifier.align(Alignment.Center),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.Center
             ) {
-                PulseWaveBrandLogo(size = 24.dp, showBackdrop = false)
-                Column(horizontalAlignment = Alignment.Start) {
-                    Text(
-                        text = playbackState.activeSoundscape.name.uppercase(),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        text = "${track.sourceType.label} · ${track.bpm} BPM",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+                PulseWaveBrandLogo(
+                    size = 34.dp,
+                    showBackdrop = false
+                )
+                Text(
+                    text = "ulseWave",
+                    style = MaterialTheme.typography.titleLarge.copy(
+                        fontFamily = PlayfairDisplayFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontStyle = FontStyle.Normal,
+                        fontSize = 23.sp,
+                        lineHeight = 26.sp,
+                        letterSpacing = 0.sp
+                    ),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    softWrap = false,
+                    modifier = Modifier.offset(x = (-3).dp, y = (-0.5).dp)
+                )
             }
 
-            Row {
+            Row(modifier = Modifier.align(Alignment.CenterEnd)) {
                 IconButton(
                     onClick = {
                         if (!isSignedIn) {
@@ -256,7 +268,14 @@ fun NowPlayingScreen(
                 Tab(
                     selected = selectedStudioTab == idx,
                     onClick = { selectedStudioTab = idx },
-                    text = { Text(title, maxLines = 1) },
+                    text = {
+                        Text(
+                            text = title,
+                            style = MaterialTheme.typography.labelLarge.copy(fontSize = 12.5.sp),
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    },
                     modifier = Modifier.testTag("studio_tab_${title.lowercase()}")
                 )
             }

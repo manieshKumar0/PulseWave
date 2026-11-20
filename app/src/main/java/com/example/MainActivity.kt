@@ -239,6 +239,7 @@ private fun AuthenticatedPulseApp(
     val albumAccent by pulseViewModel.albumAccent.collectAsStateWithLifecycle()
     val offlineCacheSummary by pulseViewModel.offlineCacheSummary.collectAsStateWithLifecycle()
     val statusMessage by pulseViewModel.statusMessage.collectAsStateWithLifecycle()
+    val activeMoodMix by pulseViewModel.activeMoodMix.collectAsStateWithLifecycle()
 
     val guestProfile = remember {
         UserProfile(
@@ -463,9 +464,25 @@ private fun AuthenticatedPulseApp(
                                 ForYouScreen(
                                     discoveryState = discoveryState,
                                     activeTrackId = playbackState.currentTrack?.id,
+                                    isPlaying = playbackState.isPlaying,
+                                    activeMoodMix = activeMoodMix,
                                     downloadProgress = downloadProgress,
                                     offlineMode = settings.offlineMode,
                                     onRefreshWithMood = { mood -> pulseViewModel.refreshCatalogAndRecommendations(mood) },
+                                    onPlayMoodMix = { mix ->
+                                        pulseViewModel.playMoodMix(
+                                            moodTitle = mix.name,
+                                            searchQuery = mix.searchQuery,
+                                            toggleIfSame = true
+                                        )
+                                    },
+                                    onAskAiDj = { prompt ->
+                                        pulseViewModel.playMoodMix(
+                                            moodTitle = prompt,
+                                            searchQuery = "$prompt music mix",
+                                            toggleIfSame = false
+                                        )
+                                    },
                                     onPlayTrack = { track, queue ->
                                         pulseViewModel.playTrack(track, queue)
                                         socialViewModel?.syncTrackBookmark(track, track.isLiked)

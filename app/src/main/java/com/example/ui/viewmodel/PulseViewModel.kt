@@ -138,11 +138,16 @@ class PulseViewModel(
     private val _statusMessage = MutableStateFlow<String?>(null)
     val statusMessage: StateFlow<String?> = _statusMessage.asStateFlow()
 
+    private val _activeMoodMix = MutableStateFlow<String?>(null)
+    val activeMoodMix: StateFlow<String?> = _activeMoodMix.asStateFlow()
+
     private var lastLoadedTrackId: String? = null
     private var lastReportedError: String? = null
     private var lastMoodPrompt: String? = null
     private var latestFriendPosts: List<FeedPostDoc> = emptyList()
     private var searchJob: Job? = null
+    private var likedRecsJob: Job? = null
+    private var moodMixJob: Job? = null
 
     private var hasRestoredEqFromPrefs = false
 
@@ -230,22 +235,29 @@ class PulseViewModel(
         latestFriendPosts = posts
     }
 
-    fun refreshCatalogAndRecommendations(moodPrompt: String? = lastMoodPrompt) {
+    fun refreshCatalogAndRecommendations(
+        moodPrompt: String? = lastMoodPrompt,
+        showLoading: Boolean = true
+    ) {
         lastMoodPrompt = moodPrompt
         viewModelScope.launch {
-            _discoveryState.value = UiState.Loading
+            if (showLoading || _discoveryState.value !is UiState.Success) {
+                _discoveryState.value = UiState.Loading
+            }
             try {
                 val offline = settings.value.offlineMode
                 val signals = libraryRepo.getRecentSignals()
                 val roomSnapshot = libraryRepo.getAllTracksSnapshot()
                 val liveDna = recommendationEngine.computeSonicDna(signals, roomSnapshot)
+                val likedTracks = collectLikedSeedTracks(roomSnapshot, signals)
 
                 var fetchedLive = emptyList<Track>()
+                var fetchedYtLikedRecs = emptyList<Track>()
                 if (!offline) {
                     val preferredGenres = liveDna.topGenres
-                    val recentArtists = roomSnapshot
+                    val recentArtists = (likedTracks + roomSnapshot
                         .filter { it.lastPlayedAt > 0L || it.isLiked }
-                        .sortedByDescending { maxOf(it.lastPlayedAt, if (it.isLiked) 1L else 0L) }
+                        .sortedByDescending { maxOf(it.lastPlayedAt, if (it.isLiked) 1L else 0L) })
                         .map { it.artist }
                         .filter {
                             it.isNotBlank() &&
@@ -256,7 +268,7 @@ class PulseViewModel(
                         .distinct()
                         .take(3)
 
-                    fetchedLive = coroutineScope {
+                    coroutineScope {
                         val ytDeferred = async {
                             try {
                                 youTubeClient.fetchDiscoveryCatalog(
@@ -272,6 +284,20 @@ class PulseViewModel(
                                 emptyList()
                             }
                         }
+                        val ytLikedDeferred = async {
+                            try {
+                                youTubeClient.fetchLikedBasedRecommendations(
+                                    likedTracks = likedTracks,
+                                    preferredGenres = preferredGenres,
+                                    limit = 12
+                                )
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                Log.w("PulseVM", "YouTube liked recommendations error: ${e.message}")
+                                emptyList()
+                            }
+                        }
                         val audiusDeferred = async {
                             try {
                                 audiusClient.fetchTrending(limit = 12)
@@ -282,7 +308,11 @@ class PulseViewModel(
                                 emptyList()
                             }
                         }
-                        (ytDeferred.await() + audiusDeferred.await()).distinctBy { it.id }
+                        fetchedYtLikedRecs = ytLikedDeferred.await()
+                            .filter { it.sourceType == TrackSourceType.YOUTUBE }
+                            .distinctBy { it.id }
+                        fetchedLive = (ytDeferred.await() + fetchedYtLikedRecs + audiusDeferred.await())
+                            .distinctBy { it.id }
                     }
                     if (fetchedLive.isNotEmpty()) {
                         val roomById = roomSnapshot.associateBy { it.id }
@@ -309,19 +339,29 @@ class PulseViewModel(
                     moodPrompt = moodPrompt,
                     offlineMode = offline
                 )
-                _discoveryState.value = UiState.Success(bundle)
+                val ytOnlyBento = (fetchedYtLikedRecs.map { mergeSavedFlags(it, roomById[it.id]) } +
+                    (bundle.heroPicks + bundle.replayPicks + bundle.explorePicks).map { it.track }
+                        .filter { it.sourceType == TrackSourceType.YOUTUBE })
+                    .filter { it.sourceType == TrackSourceType.YOUTUBE }
+                    .distinctBy { it.id }
+                    .take(10)
+
+                _discoveryState.value = UiState.Success(
+                    bundle.copy(youtubeLikedRecs = ytOnlyBento)
+                )
 
                 if (!offline) {
-                    val topHeroYtIds = bundle.heroPicks
-                        .mapNotNull { pick ->
-                            youTubeClient.registerTrackHint(pick.track)
-                            pick.track.youtubeVideoId
+                    val topYtIds = (ytOnlyBento.take(3) + bundle.heroPicks.map { it.track })
+                        .mapNotNull { track ->
+                            youTubeClient.registerTrackHint(track)
+                            track.youtubeVideoId
                         }
-                        .take(2)
-                    if (topHeroYtIds.isNotEmpty()) {
+                        .distinct()
+                        .take(3)
+                    if (topYtIds.isNotEmpty()) {
                         launch(Dispatchers.IO) {
                             runCatching {
-                                youTubeClient.prewarmAudioStreams(topHeroYtIds, maxConcurrent = 2)
+                                youTubeClient.prewarmAudioStreams(topYtIds, maxConcurrent = 3)
                             }
                         }
                     }
@@ -330,6 +370,55 @@ class PulseViewModel(
                 throw e
             } catch (e: Exception) {
                 _discoveryState.value = UiState.Error(e.localizedMessage ?: "Failed to build recommendations")
+            }
+        }
+    }
+
+    private fun collectLikedSeedTracks(
+        roomSnapshot: List<Track>,
+        signals: List<ListeningSignalEntity>
+    ): List<Track> {
+        val likedIdsFromSignals = signals.filter { it.liked }.map { it.trackId }.toSet()
+        return (roomSnapshot + allLibraryTracks.value)
+            .distinctBy { it.id }
+            .filter { it.isLiked || it.id in likedIdsFromSignals }
+            .sortedWith(
+                compareByDescending<Track> { it.isLiked }
+                    .thenByDescending { it.lastPlayedAt }
+                    .thenByDescending { it.playCount }
+            )
+    }
+
+    private fun refreshYouTubeLikedRecommendationsInBackground() {
+        if (settings.value.offlineMode) return
+        likedRecsJob?.cancel()
+        likedRecsJob = viewModelScope.launch {
+            delay(250L)
+            runCatching {
+                val roomSnapshot = libraryRepo.getAllTracksSnapshot()
+                val signals = libraryRepo.getRecentSignals()
+                val liveDna = recommendationEngine.computeSonicDna(signals, roomSnapshot)
+                val likedTracks = collectLikedSeedTracks(roomSnapshot, signals)
+                val roomById = roomSnapshot.associateBy { it.id }
+                val freshYtRecs = youTubeClient.fetchLikedBasedRecommendations(
+                    likedTracks = likedTracks,
+                    preferredGenres = liveDna.topGenres,
+                    limit = 12
+                )
+                    .filter { it.sourceType == TrackSourceType.YOUTUBE }
+                    .distinctBy { it.id }
+                    .map { mergeSavedFlags(it, roomById[it.id]) }
+
+                if (freshYtRecs.isNotEmpty()) {
+                    freshYtRecs.take(3).forEach { youTubeClient.registerTrackHint(it) }
+                    _discoveryState.update { state ->
+                        if (state is UiState.Success) {
+                            state.copy(data = state.data.copy(youtubeLikedRecs = freshYtRecs))
+                        } else {
+                            state
+                        }
+                    }
+                }
             }
         }
     }
@@ -431,12 +520,131 @@ class PulseViewModel(
     }
 
     fun playTrack(track: Track, queue: List<Track> = allLibraryTracks.value) {
+        _activeMoodMix.value = null
+        startPlaybackInternal(track, queue)
+    }
+
+    private fun startPlaybackInternal(track: Track, queue: List<Track>) {
         val safeQueue = queue.ifEmpty { listOf(track) }
         playbackController.playTrack(track, safeQueue)
         viewModelScope.launch(Dispatchers.IO) {
             val persisted = libraryRepo.recordTrackPlayed(track)
             if (persisted != track) {
                 syncTrackStateAcrossUi(persisted)
+            }
+        }
+    }
+
+    fun playMoodMix(
+        moodTitle: String,
+        searchQuery: String,
+        toggleIfSame: Boolean = true
+    ) {
+        val cleanTitle = moodTitle.trim()
+        val cleanQuery = searchQuery.trim().ifBlank { cleanTitle }
+        if (cleanTitle.isBlank()) return
+
+        if (toggleIfSame &&
+            _activeMoodMix.value.equals(cleanTitle, ignoreCase = true) &&
+            playbackState.value.currentTrack != null
+        ) {
+            playbackController.togglePlayPause()
+            return
+        }
+
+        moodMixJob?.cancel()
+        _activeMoodMix.value = cleanTitle
+        moodMixJob = viewModelScope.launch {
+            _statusMessage.value = "Tuning $cleanTitle mix…"
+            try {
+                val isOffline = settings.value.offlineMode
+                val roomSnapshot = libraryRepo.getAllTracksSnapshot()
+                val roomById = roomSnapshot.associateBy { it.id }
+
+                val mixTracks: List<Track> = if (isOffline) {
+                    val tokens = (cleanTitle + " " + cleanQuery)
+                        .lowercase()
+                        .split(Regex("[^a-z0-9]+"))
+                        .filter { it.length >= 3 }
+                    val offlineTracks = libraryRepo.getOfflinePlayableSnapshot()
+                    val matched = offlineTracks.filter { t ->
+                        tokens.any { tok ->
+                            t.mood.contains(tok, ignoreCase = true) ||
+                                t.genre.contains(tok, ignoreCase = true) ||
+                                t.title.contains(tok, ignoreCase = true) ||
+                                t.artist.contains(tok, ignoreCase = true)
+                        }
+                    }
+                    matched.ifEmpty { offlineTracks }
+                } else {
+                    val (ytHits, audiusHits) = coroutineScope {
+                        val ytDeferred = async {
+                            try {
+                                youTubeClient.searchMusic(cleanQuery, limit = 15)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                Log.w("PulseVM", "Mood mix YT search error: ${e.message}")
+                                emptyList()
+                            }
+                        }
+                        val audiusDeferred = async {
+                            try {
+                                audiusClient.search(cleanTitle, limit = 6)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (_: Exception) {
+                                emptyList()
+                            }
+                        }
+                        ytDeferred.await() to audiusDeferred.await()
+                    }
+                    val tokens = cleanTitle.lowercase().split(Regex("[^a-z0-9]+")).filter { it.length >= 3 }
+                    val localMatched = (allLibraryTracks.value + roomSnapshot)
+                        .distinctBy { it.id }
+                        .filter { t ->
+                            tokens.any { tok ->
+                                t.title.contains(tok, true) ||
+                                    t.artist.contains(tok, true) ||
+                                    t.genre.contains(tok, true) ||
+                                    t.mood.contains(tok, true)
+                            }
+                        }
+                    (ytHits + audiusHits + localMatched)
+                        .distinctBy { it.id }
+                        .map { mergeSavedFlags(it, roomById[it.id]) }
+                }
+
+                if (mixTracks.isEmpty()) {
+                    _activeMoodMix.value = null
+                    _statusMessage.value = if (isOffline) {
+                        "No downloaded tracks match \"$cleanTitle\" in Offline Mode"
+                    } else {
+                        "Couldn't find tracks for \"$cleanTitle\""
+                    }
+                    return@launch
+                }
+
+                val firstTrack = mixTracks.first()
+                if (!isOffline) {
+                    val topIds = mixTracks.mapNotNull { it.youtubeVideoId }.take(3)
+                    if (topIds.isNotEmpty()) {
+                        launch(Dispatchers.IO) {
+                            runCatching { youTubeClient.prewarmAudioStreams(topIds, maxConcurrent = 3) }
+                        }
+                    }
+                }
+                startPlaybackInternal(firstTrack, mixTracks)
+                _statusMessage.value = "Playing $cleanTitle · ${firstTrack.title}"
+
+                if (!toggleIfSame) {
+                    refreshCatalogAndRecommendations(moodPrompt = cleanTitle, showLoading = false)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _activeMoodMix.value = null
+                _statusMessage.value = e.localizedMessage ?: "Couldn't start $cleanTitle mix"
             }
         }
     }
@@ -491,6 +699,7 @@ class PulseViewModel(
                     )
                 )
             }
+            refreshYouTubeLikedRecommendationsInBackground()
         }
     }
 
@@ -555,6 +764,9 @@ class PulseViewModel(
                         },
                         explorePicks = bundle.explorePicks.map { pick ->
                             if (pick.track.id == updated.id) pick.copy(track = updated) else pick
+                        },
+                        youtubeLikedRecs = bundle.youtubeLikedRecs.map { rec ->
+                            if (rec.id == updated.id) updated else rec
                         }
                     )
                 )

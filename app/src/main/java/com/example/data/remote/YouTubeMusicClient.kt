@@ -345,6 +345,111 @@ class YouTubeMusicClient {
         merged.values.toList()
     }
 
+    /**
+     * Fetches YouTube Music recommendations seeded directly from the songs/artists the user has liked.
+     * Combines YouTube Music's Up-Next / Radio endpoint (`RDAMVM<videoId>`) for liked YouTube tracks
+     * with targeted YouTube Music searches derived from liked song titles, artists, and genres.
+     * Guaranteed to return ONLY YouTube Music tracks (`TrackSourceType.YOUTUBE`).
+     */
+    suspend fun fetchLikedBasedRecommendations(
+        likedTracks: List<Track>,
+        preferredGenres: List<String> = emptyList(),
+        limit: Int = 12
+    ): List<Track> = withContext(Dispatchers.IO) {
+        val ytLikedSeeds = likedTracks
+            .mapNotNull { track -> track.youtubeVideoId?.let { vid -> vid to track } }
+            .distinctBy { it.first }
+            .take(3)
+        val seedVideoIdSet = likedTracks.mapNotNull { it.youtubeVideoId }.toSet()
+
+        val radioBatches = if (ytLikedSeeds.isNotEmpty()) {
+            coroutineScope {
+                ytLikedSeeds.take(2).map { (videoId, seedTrack) ->
+                    async {
+                        val nextRecs = runCatching {
+                            queryWebRemixNextRecommendations(videoId = videoId, limit = 10)
+                        }.getOrDefault(emptyList())
+                        val raw = if (nextRecs.isNotEmpty()) {
+                            nextRecs
+                        } else {
+                            runCatching {
+                                fetchRelatedViaNewPipe(videoId = videoId, limit = 8)
+                            }.getOrDefault(emptyList())
+                        }
+                        raw.map { rec ->
+                            if (rec.genre == "YouTube" && seedTrack.genre.isNotBlank() && !seedTrack.genre.equals("YouTube", true)) {
+                                rec.copy(genre = seedTrack.genre)
+                            } else rec
+                        }
+                    }
+                }.awaitAll()
+            }
+        } else {
+            emptyList()
+        }
+
+        val likedQueries = buildLikedRecommendationQueries(
+            likedTracks = likedTracks,
+            preferredGenres = preferredGenres
+        )
+        val perQuery = ((limit / likedQueries.size.coerceAtLeast(1)) + 3).coerceIn(6, 12)
+        val searchBatches = coroutineScope {
+            likedQueries.map { q ->
+                async {
+                    val filtered = runCatching {
+                        queryWebRemixSearch(query = q, params = SONGS_FILTER_PARAMS, limit = perQuery)
+                    }.getOrDefault(emptyList())
+                    if (filtered.isNotEmpty()) {
+                        filtered
+                    } else {
+                        runCatching {
+                            queryWebRemixSearch(query = q, params = null, limit = perQuery)
+                        }.getOrDefault(emptyList())
+                    }
+                }
+            }.awaitAll()
+        }
+
+        val merged = LinkedHashMap<String, Track>()
+        val combinedBatches = radioBatches + searchBatches
+        val maxBatchSize = combinedBatches.maxOfOrNull { it.size } ?: 0
+
+        // Pass 1: prioritize fresh recommended YouTube songs (excluding the seed tracks themselves)
+        for (idx in 0 until maxBatchSize) {
+            for (batch in combinedBatches) {
+                val track = batch.getOrNull(idx) ?: continue
+                if (track.sourceType != TrackSourceType.YOUTUBE) continue
+                val vid = track.youtubeVideoId
+                if (vid != null && vid in seedVideoIdSet) continue
+                if (merged.size < limit) {
+                    merged.putIfAbsent(track.id, track)
+                }
+            }
+            if (merged.size >= limit) break
+        }
+
+        // Pass 2: if fewer than target limit, allow liked YouTube tracks or NewPipe fallback
+        if (merged.size < limit) {
+            for (batch in combinedBatches) {
+                for (track in batch) {
+                    if (track.sourceType != TrackSourceType.YOUTUBE) continue
+                    if (merged.size < limit) {
+                        merged.putIfAbsent(track.id, track)
+                    }
+                }
+            }
+        }
+
+        if (merged.isEmpty() && likedQueries.isNotEmpty()) {
+            runCatching { searchViaNewPipe(likedQueries.first(), limit) }
+                .getOrDefault(emptyList())
+                .filter { it.sourceType == TrackSourceType.YOUTUBE }
+                .forEach { merged.putIfAbsent(it.id, it) }
+        }
+
+        merged.values.take(limit)
+    }
+
     suspend fun prewarmAudioStreams(videoIds: List<String>, maxConcurrent: Int = 3) {
         val targets = videoIds
             .map { it.trim() }
@@ -900,6 +1005,77 @@ class YouTubeMusicClient {
         }
     }
 
+    private fun queryWebRemixNextRecommendations(
+        videoId: String,
+        limit: Int
+    ): List<Track> {
+        val cleanId = videoId.trim()
+        if (!VIDEO_ID_REGEX.matches(cleanId)) return emptyList()
+        val session = sessionManager.currentHeaderProfile()
+        val clientObj = JSONObject()
+            .put("clientName", "WEB_REMIX")
+            .put("clientVersion", WEB_REMIX_CLIENT_VERSION)
+            .put("hl", "en")
+            .put("gl", "US")
+
+        val payload = JSONObject()
+            .put("context", JSONObject().put("client", clientObj))
+            .put("videoId", cleanId)
+            .put("playlistId", "RDAMVM$cleanId")
+            .put("isAudioOnly", true)
+
+        val reqBuilder = Request.Builder()
+            .url("https://music.youtube.com/youtubei/v1/next?prettyPrint=false")
+            .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
+            .header("Content-Type", "application/json")
+            .header("Origin", "https://music.youtube.com")
+            .header("Referer", "https://music.youtube.com/")
+            .header("User-Agent", session.desktopUserAgent)
+            .header("Accept-Language", session.acceptLanguage)
+            .header("X-YouTube-Client-Name", "67")
+            .header("X-YouTube-Client-Version", WEB_REMIX_CLIENT_VERSION)
+
+        sessionManager.getOrFetchVisitorData(playbackOkHttpClient)?.let { visitor ->
+            reqBuilder.header("X-Goog-Visitor-Id", visitor)
+        }
+
+        playbackOkHttpClient.newCall(reqBuilder.build()).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw IOException("YouTube Music next HTTP ${response.code}")
+            }
+            val body = response.body?.string().orEmpty()
+            return parseWebRemixNextJson(body, queryHint = "Liked Mix").take(limit)
+        }
+    }
+
+    private fun fetchRelatedViaNewPipe(videoId: String, limit: Int): List<Track> {
+        val cleanId = videoId.trim()
+        if (!VIDEO_ID_REGEX.matches(cleanId)) return emptyList()
+        ensureNewPipeInitialized()
+        val info = StreamInfo.getInfo(ServiceList.YouTube, "https://www.youtube.com/watch?v=$cleanId")
+        return info.relatedItems
+            .filterIsInstance<StreamInfoItem>()
+            .mapNotNull { item ->
+                val relId = extractVideoId(item.url) ?: return@mapNotNull null
+                val title = item.name?.trim().orEmpty()
+                if (title.isBlank()) return@mapNotNull null
+                val artist = item.uploaderName?.removeSuffix(" - Topic")?.trim()?.ifBlank { "YouTube Music" }
+                    ?: "YouTube Music"
+                val thumb = item.thumbnails.maxByOrNull { it.width * it.height }?.url
+                    ?: "https://i.ytimg.com/vi/$relId/hqdefault.jpg"
+                buildYouTubeTrack(
+                    videoId = relId,
+                    title = title,
+                    artist = artist,
+                    album = "YouTube Music",
+                    durationMs = (item.duration.takeIf { it > 0 } ?: 190L) * 1000L,
+                    artworkUrl = upscaleArtworkUrl(thumb),
+                    queryHint = "Related"
+                )
+            }
+            .take(limit)
+    }
+
     private fun searchViaNewPipe(query: String, limit: Int): List<Track> {
         ensureNewPipeInitialized()
         val handler = ServiceList.YouTube.searchQHFactory.fromQuery(query)
@@ -1121,6 +1297,136 @@ class YouTubeMusicClient {
                 add("arijit singh top hits")
             }.distinct().take(3)
         }
+
+        internal fun buildLikedRecommendationQueries(
+            likedTracks: List<Track>,
+            preferredGenres: List<String> = emptyList()
+        ): List<String> {
+            val ignoredNames = setOf("youtube music", "youtube", "local device", "cloud drive", "unknown artist", "single")
+            val queries = mutableListOf<String>()
+
+            val validArtists = likedTracks
+                .map { it.artist.trim() }
+                .filter { it.isNotBlank() && it.lowercase() !in ignoredNames }
+                .distinct()
+
+            val validSongSeeds = likedTracks
+                .filter { it.title.isNotBlank() && it.artist.trim().lowercase() !in ignoredNames }
+                .distinctBy { it.trackKey }
+
+            // Seed queries from specific liked songs and artists
+            validSongSeeds.take(2).forEach { seed ->
+                queries.add("${seed.artist} ${seed.title} similar songs")
+            }
+            validArtists.take(3).forEach { artist ->
+                queries.add("$artist top hits songs")
+            }
+
+            val likedGenres = (likedTracks.map { it.genre } + preferredGenres)
+                .map { it.trim() }
+                .filter { it.isNotBlank() && !it.equals("YouTube", true) && !it.equals("Imported", true) }
+                .distinct()
+            likedGenres.take(2).forEach { genre ->
+                queries.add("best $genre songs hits")
+            }
+
+            if (queries.isEmpty()) {
+                queries.add("top trending global music hits")
+                queries.add("popular pop chill hits")
+            }
+            return queries.distinct().take(4)
+        }
+
+        internal fun parseWebRemixNextJson(rawJson: String, queryHint: String = ""): List<Track> {
+            if (rawJson.isBlank()) return emptyList()
+            val root = runCatching { JSONObject(rawJson) }.getOrNull() ?: return emptyList()
+            val renderers = mutableListOf<JSONObject>()
+            collectPlaylistPanelRenderers(root, renderers)
+
+            val parsed = LinkedHashMap<String, Track>()
+            for (renderer in renderers) {
+                val track = parsePlaylistPanelRenderer(renderer, queryHint) ?: continue
+                parsed.putIfAbsent(track.id, track)
+            }
+            return parsed.values.toList()
+        }
+
+        private fun collectPlaylistPanelRenderers(node: Any?, out: MutableList<JSONObject>) {
+            when (node) {
+                is JSONObject -> {
+                    node.optJSONObject("playlistPanelVideoRenderer")?.let { out.add(it) }
+                    val keys = node.keys()
+                    while (keys.hasNext()) {
+                        val k = keys.next()
+                        if (k == "playlistPanelVideoRenderer") continue
+                        collectPlaylistPanelRenderers(node.opt(k), out)
+                    }
+                }
+                is JSONArray -> {
+                    for (i in 0 until node.length()) {
+                        collectPlaylistPanelRenderers(node.opt(i), out)
+                    }
+                }
+            }
+        }
+
+        private fun parsePlaylistPanelRenderer(renderer: JSONObject, queryHint: String): Track? {
+            val videoId = renderer.optString("videoId").trim()
+            if (!VIDEO_ID_REGEX.matches(videoId)) return null
+
+            val title = extractRunsText(renderer.optJSONObject("title")).trim()
+            if (title.isBlank()) return null
+
+            val bylineRuns = extractRunsList(
+                renderer.optJSONObject("longBylineText") ?: renderer.optJSONObject("shortBylineText")
+            )
+            val metaTokens = splitMetadataTokens(bylineRuns)
+            var durationMs = parseDurationTextMs(extractRunsText(renderer.optJSONObject("lengthText")))
+            val nonDurationParts = mutableListOf<String>()
+            for (token in metaTokens) {
+                val parsedDur = parseDurationTextMs(token)
+                if (parsedDur > 0L) {
+                    if (durationMs <= 0L) durationMs = parsedDur
+                } else if (!IGNORED_TYPE_TOKENS.contains(token.lowercase())) {
+                    nonDurationParts.add(token)
+                }
+            }
+            if (durationMs <= 0L) durationMs = 200_000L
+
+            val artist = nonDurationParts.firstOrNull()?.takeIf { it.isNotBlank() } ?: "YouTube Music"
+            val album = nonDurationParts.getOrNull(1)?.takeIf { it.isNotBlank() } ?: "YouTube Music"
+
+            val thumbnails = renderer.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
+            var rawArt = ""
+            if (thumbnails != null && thumbnails.length() > 0) {
+                rawArt = thumbnails.optJSONObject(thumbnails.length() - 1)?.optString("url").orEmpty()
+            }
+            val artwork = if (rawArt.isNotBlank()) upscaleArtworkUrl(rawArt)
+            else "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+
+            return buildYouTubeTrack(
+                videoId = videoId,
+                title = title,
+                artist = artist,
+                album = album,
+                durationMs = durationMs,
+                artworkUrl = artwork,
+                queryHint = queryHint
+            )
+        }
+
+        private fun extractRunsList(textObj: JSONObject?): List<String> {
+            val runs = textObj?.optJSONArray("runs") ?: return emptyList()
+            return buildList {
+                for (i in 0 until runs.length()) {
+                    val txt = runs.optJSONObject(i)?.optString("text").orEmpty()
+                    if (txt.isNotEmpty()) add(txt)
+                }
+            }
+        }
+
+        private fun extractRunsText(textObj: JSONObject?): String =
+            extractRunsList(textObj).joinToString("")
 
         internal fun parseWebRemixSearchJson(rawJson: String, queryHint: String = ""): List<Track> {
             if (rawJson.isBlank()) return emptyList()
