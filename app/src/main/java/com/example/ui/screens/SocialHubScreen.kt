@@ -80,7 +80,7 @@ import com.example.data.model.UserProfile
 import com.example.ui.components.CreatePulseRoomDialog
 import com.example.ui.components.GoogleSignInGateCard
 import com.example.ui.components.ObsidianGlassCard
-import com.example.ui.components.PulseWaveBrandLogo
+import com.example.ui.components.PulseScreenHeader
 import com.example.ui.components.SonicDnaRadarChart
 import com.example.ui.components.TrackArtworkThumb
 import com.example.ui.components.defaultPulseRoomName
@@ -102,20 +102,10 @@ fun SocialGuestGateScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                PulseWaveBrandLogo(size = 38.dp)
-                Column {
-                    Text("Pulse Social", style = MaterialTheme.typography.headlineLarge)
-                    Text(
-                        text = "Sign in required · Guest listening active",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-            }
+            PulseScreenHeader(
+                title = "Pulse Social",
+                titleTestTag = "social_header_title"
+            )
         }
 
         item {
@@ -206,23 +196,11 @@ fun SocialHubScreen(
     }
 
     Column(modifier = modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            PulseWaveBrandLogo(size = 38.dp)
-            Column {
-                Text("Pulse Social", style = MaterialTheme.typography.headlineLarge)
-                Text(
-                    text = "@${currentUserProfile.handle} · ${connectedFriends.size} friends connected",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            }
-        }
+        PulseScreenHeader(
+            title = "Pulse Social",
+            titleTestTag = "social_header_title",
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+        )
 
         TabRow(
             selectedTabIndex = selectedTab,

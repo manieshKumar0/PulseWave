@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -55,10 +56,13 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -77,19 +81,27 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.R
 import com.example.data.model.CollaborativePlaylistDoc
 import com.example.data.model.Track
 import com.example.data.model.TrackSourceType
 import com.example.data.model.UserProfile
+import androidx.compose.ui.graphics.lerp
+import com.example.media.AudioSpectrumBus
+import com.example.media.AudioVisualizerFrame
 import com.example.ui.theme.CoralWave
 import com.example.ui.theme.MintElectric
+import com.example.ui.theme.PlayfairDisplayFontFamily
 import com.example.ui.theme.UltravioletPulse
+import kotlin.math.exp
 import kotlin.math.sin
 
 @Composable
@@ -134,6 +146,44 @@ fun PulseWaveBrandLogo(
                 .size(size)
                 .testTag("pulsewave_brand_logo")
         )
+    }
+}
+
+@Composable
+fun PulseScreenHeader(
+    title: String,
+    modifier: Modifier = Modifier,
+    titleTestTag: String? = null,
+    trailingAction: (@Composable () -> Unit)? = null
+) {
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.headlineLarge.copy(
+                fontFamily = PlayfairDisplayFontFamily,
+                fontWeight = FontWeight.Bold,
+                fontStyle = FontStyle.Normal,
+                fontSize = 30.sp,
+                lineHeight = 36.sp,
+                letterSpacing = 0.sp
+            ),
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .align(Alignment.Center)
+                .padding(horizontal = if (trailingAction != null) 48.dp else 0.dp)
+                .let { base -> if (titleTestTag != null) base.testTag(titleTestTag) else base }
+        )
+        if (trailingAction != null) {
+            Box(modifier = Modifier.align(Alignment.CenterEnd)) {
+                trailingAction()
+            }
+        }
     }
 }
 
@@ -242,30 +292,141 @@ fun BeatReactiveWaveformCanvas(
     isPlaying: Boolean,
     primaryColor: Color,
     secondaryColor: Color = UltravioletPulse,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    spectrumBands: List<Float>? = null,
+    useLiveAudio: Boolean = true
 ) {
-    val animatedEnergy by animateFloatAsState(
-        targetValue = if (isPlaying) energy else 0.18f,
-        animationSpec = spring(dampingRatio = 0.65f, stiffness = 420f),
-        label = "beat_energy"
-    )
+    val barCount = AudioVisualizerFrame.BAND_COUNT
+    val smoothedBands = remember { FloatArray(barCount) }
+    val peakCaps = remember { FloatArray(barCount) }
+    var frameTick by remember { mutableLongStateOf(0L) }
+
+    LaunchedEffect(isPlaying, useLiveAudio, spectrumBands) {
+        var lastFrameNanos = 0L
+        while (true) {
+            var shouldContinue = false
+            withFrameNanos { frameNanos ->
+                val dt = if (lastFrameNanos == 0L) {
+                    0.016f
+                } else {
+                    ((frameNanos - lastFrameNanos) / 1_000_000_000f).coerceIn(0.004f, 0.05f)
+                }
+                lastFrameNanos = frameNanos
+
+                val liveFrame = if (spectrumBands == null && useLiveAudio && isPlaying) {
+                    AudioSpectrumBus.sampleNow(isPlaying = true)
+                } else {
+                    AudioVisualizerFrame.EMPTY
+                }
+
+                val attackAlpha = 1f - exp(-dt * 28f)
+                val decayAlpha = 1f - exp(-dt * 9.5f)
+                val peakDecay = dt * 0.48f
+
+                var anyActive = false
+                for (i in 0 until barCount) {
+                    val target = when {
+                        spectrumBands != null -> (spectrumBands.getOrElse(i) { 0f }).coerceIn(0f, 1f)
+                        !isPlaying -> 0f
+                        liveFrame.isLive -> {
+                            val prev = liveFrame.bands[(i - 1).coerceAtLeast(0)]
+                            val curr = liveFrame.bands[i]
+                            val next = liveFrame.bands[(i + 1).coerceAtMost(barCount - 1)]
+                            (prev * 0.14f + curr * 0.72f + next * 0.14f).coerceIn(0f, 1f)
+                        }
+                        else -> {
+                            // Subtle standby shimmer only while stream audio sink is warming up
+                            val shimmer = 0.5f + 0.5f * sin(i * 0.45f + (frameNanos / 180_000_000.0).toFloat())
+                            (energy.coerceIn(0f, 1f) * 0.22f * shimmer).coerceIn(0f, 0.25f)
+                        }
+                    }
+
+                    val current = smoothedBands[i]
+                    val alpha = if (target >= current) attackAlpha else decayAlpha
+                    val updated = current + (target - current) * alpha
+                    smoothedBands[i] = if (updated < 0.004f) 0f else updated
+
+                    val nextPeak = maxOf(updated, peakCaps[i] - peakDecay)
+                    peakCaps[i] = if (nextPeak < 0.004f) 0f else nextPeak
+
+                    if (smoothedBands[i] > 0.004f || peakCaps[i] > 0.004f) {
+                        anyActive = true
+                    }
+                }
+
+                frameTick++
+                shouldContinue = isPlaying || anyActive
+            }
+            if (!shouldContinue) break
+        }
+    }
+
     Canvas(modifier = modifier) {
-        val barCount = 28
-        val spacing = size.width / (barCount * 1.45f)
-        val barWidth = (size.width - spacing * (barCount - 1)) / barCount
+        // Read frameTick so only the Canvas draw phase invalidates at display refresh rate
+        val tick = frameTick
+        if (tick < 0L) return@Canvas
+
+        val spacing = (size.width / (barCount * 2.15f)).coerceIn(2.5f, 8f)
+        val totalSpacing = spacing * (barCount - 1)
+        val barWidth = ((size.width - totalSpacing) / barCount).coerceAtLeast(2f)
+        val maxBarHeight = size.height * 0.90f
+        val minBarHeight = (barWidth * 1.15f).coerceIn(4f, size.height * 0.16f)
+
         for (i in 0 until barCount) {
-            val phase = sin((i * 0.55f) + (animatedEnergy * 6.5f))
-            val envelope = (0.35f + 0.65f * kotlin.math.abs(phase)) * animatedEnergy
-            val barHeight = (size.height * envelope).coerceAtLeast(6f)
+            val t = i.toFloat() / (barCount - 1).coerceAtLeast(1)
+            val baseColor = lerp(primaryColor, secondaryColor, t)
+            val level = smoothedBands[i].coerceIn(0f, 1f)
+            val peak = peakCaps[i].coerceIn(0f, 1f)
+
+            val shapedLevel = level.let { it * 0.85f + it * it * 0.15f }
+            val barHeight = (minBarHeight + (maxBarHeight - minBarHeight) * shapedLevel)
+                .coerceAtMost(size.height)
             val top = (size.height - barHeight) / 2f
             val x = i * (barWidth + spacing)
-            val color = if (i % 3 == 0) secondaryColor else primaryColor
+
+            // Soft glow aura behind energetic frequency peaks
+            if (level > 0.28f) {
+                val glowPadX = barWidth * 0.28f
+                val glowPadY = barHeight * 0.08f
+                drawRoundRect(
+                    color = baseColor.copy(alpha = (level - 0.20f).coerceIn(0f, 0.30f)),
+                    topLeft = Offset(x - glowPadX, (top - glowPadY).coerceAtLeast(0f)),
+                    size = Size(barWidth + glowPadX * 2f, (barHeight + glowPadY * 2f).coerceAtMost(size.height)),
+                    cornerRadius = CornerRadius(barWidth, barWidth)
+                )
+            }
+
+            val barColor = lerp(baseColor, Color.White, (level * 0.22f).coerceIn(0f, 0.22f))
+                .copy(alpha = (0.30f + 0.68f * level).coerceIn(0.30f, 0.98f))
+
             drawRoundRect(
-                color = color.copy(alpha = 0.85f),
+                color = barColor,
                 topLeft = Offset(x, top),
                 size = Size(barWidth, barHeight),
                 cornerRadius = CornerRadius(barWidth / 2f, barWidth / 2f)
             )
+
+            // Crisp floating peak-cap dots on strong transients
+            if (peak > level + 0.07f && peak > 0.18f) {
+                val peakSpan = minBarHeight + (maxBarHeight - minBarHeight) * peak
+                val peakDotSize = (barWidth * 0.62f).coerceIn(2f, 5f)
+                val peakAlpha = ((peak - level) * 3.2f).coerceIn(0.18f, 0.72f)
+                val topDotY = ((size.height - peakSpan) / 2f - peakDotSize * 0.6f).coerceAtLeast(0f)
+                val bottomDotY = ((size.height + peakSpan) / 2f - peakDotSize * 0.4f).coerceAtMost(size.height - peakDotSize)
+                val dotX = x + (barWidth - peakDotSize) / 2f
+                drawRoundRect(
+                    color = barColor.copy(alpha = peakAlpha),
+                    topLeft = Offset(dotX, topDotY),
+                    size = Size(peakDotSize, peakDotSize),
+                    cornerRadius = CornerRadius(peakDotSize / 2f, peakDotSize / 2f)
+                )
+                drawRoundRect(
+                    color = barColor.copy(alpha = peakAlpha),
+                    topLeft = Offset(dotX, bottomDotY),
+                    size = Size(peakDotSize, peakDotSize),
+                    cornerRadius = CornerRadius(peakDotSize / 2f, peakDotSize / 2f)
+                )
+            }
         }
     }
 }
@@ -321,7 +482,7 @@ fun MiniPlayerBar(
                         )
                         Spacer(Modifier.width(4.dp))
                         Text(
-                            text = "${track.artist} · ${track.bpm} BPM",
+                            text = track.artist,
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -412,36 +573,41 @@ fun TrackRowItem(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(Modifier.height(4.dp))
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        shape = RoundedCornerShape(6.dp)
+                val badgeText = track.genre.trim()
+                if (badgeText.isNotEmpty() || track.isDownloaded || track.sourceType == TrackSourceType.CLOUD_SAF) {
+                    Spacer(Modifier.height(4.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = "${track.genre} · ${track.bpm} BPM",
-                            style = MaterialTheme.typography.labelSmall,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                            maxLines = 1
-                        )
-                    }
-                    if (track.isDownloaded) {
-                        Icon(
-                            imageVector = Icons.Rounded.CheckCircle,
-                            contentDescription = "Downloaded offline",
-                            tint = MintElectric,
-                            modifier = Modifier.size(14.dp)
-                        )
-                    } else if (track.sourceType == TrackSourceType.CLOUD_SAF) {
-                        Icon(
-                            imageVector = Icons.Rounded.CloudDone,
-                            contentDescription = "Cloud storage track",
-                            tint = UltravioletPulse,
-                            modifier = Modifier.size(14.dp)
-                        )
+                        if (badgeText.isNotEmpty()) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text(
+                                    text = badgeText,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                        if (track.isDownloaded) {
+                            Icon(
+                                imageVector = Icons.Rounded.CheckCircle,
+                                contentDescription = "Downloaded offline",
+                                tint = MintElectric,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        } else if (track.sourceType == TrackSourceType.CLOUD_SAF) {
+                            Icon(
+                                imageVector = Icons.Rounded.CloudDone,
+                                contentDescription = "Cloud storage track",
+                                tint = UltravioletPulse,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
                     }
                 }
             }

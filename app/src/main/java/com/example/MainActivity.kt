@@ -74,7 +74,6 @@ import com.example.data.local.PulseDatabase
 import com.example.data.model.SonicDnaProfile
 import com.example.data.model.Track
 import com.example.data.model.UserProfile
-import com.example.data.remote.AudiusCatalogClient
 import com.example.data.remote.LrclibClient
 import com.example.data.remote.OfflineDownloadManager
 import com.example.data.remote.YouTubeMusicClient
@@ -185,7 +184,6 @@ private fun AuthenticatedPulseApp(
                 val libraryRepo = LocalLibraryRepository(db)
                 val prefs = PreferencesRepository(appContext)
                 val lrclib = LrclibClient()
-                val audius = AudiusCatalogClient()
                 val youtube = YouTubeMusicClient.shared
                 val downloader = OfflineDownloadManager(appContext, libraryRepo, lrclib, youtube)
                 val saf = SafMusicImporter(appContext)
@@ -195,7 +193,6 @@ private fun AuthenticatedPulseApp(
                     appContext = appContext,
                     libraryRepo = libraryRepo,
                     prefsRepo = prefs,
-                    audiusClient = audius,
                     lrclibClient = lrclib,
                     downloadManager = downloader,
                     safImporter = saf,
@@ -230,6 +227,7 @@ private fun AuthenticatedPulseApp(
     val libraryTracks by pulseViewModel.allLibraryTracks.collectAsStateWithLifecycle()
     val searchResults by pulseViewModel.searchResults.collectAsStateWithLifecycle()
     val isSearching by pulseViewModel.isSearching.collectAsStateWithLifecycle()
+    val searchError by pulseViewModel.searchError.collectAsStateWithLifecycle()
     val downloadProgress by pulseViewModel.downloadProgress.collectAsStateWithLifecycle()
     val parsedLyrics by pulseViewModel.parsedLyrics.collectAsStateWithLifecycle()
     val isLoadingLyrics by pulseViewModel.isLoadingLyrics.collectAsStateWithLifecycle()
@@ -508,6 +506,7 @@ private fun AuthenticatedPulseApp(
                                     tracks = libraryTracks,
                                     searchResults = searchResults,
                                     isSearching = isSearching,
+                                    searchError = searchError,
                                     activeTrack = playbackState.currentTrack,
                                     downloadProgress = downloadProgress,
                                     offlineMode = settings.offlineMode,

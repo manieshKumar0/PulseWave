@@ -199,14 +199,14 @@ class OfflineDownloadManager(
 
         val videoId = track.youtubeVideoId
         if (videoId != null) {
-            val resolved = youTubeClient.resolveAudioStream(
+            val resolvedResult = youTubeClient.resolveAudioStream(
                 videoId = videoId,
                 forceRefresh = forceRefresh,
                 trackTitle = track.title,
                 trackArtist = track.artist,
                 trackDurationMs = track.durationMs
-            ).getOrNull()
-
+            )
+            val resolved = resolvedResult.getOrNull()
             if (resolved != null && !resolved.isHls && !resolved.url.contains(".m3u8", ignoreCase = true)) {
                 return DownloadTarget(
                     url = resolved.url,
@@ -214,43 +214,12 @@ class OfflineDownloadManager(
                     headers = resolved.requestHeaders
                 )
             }
-        }
-
-        val fallback = FallbackAudioResolver(client) { url, headers ->
-            probeDirectStream(url, headers)
-        }.resolveMatchingStream(
-            title = track.title,
-            artist = track.artist,
-            expectedDurationMs = track.durationMs,
-            preferHighQuality = youTubeClient.preferHighQuality
-        )
-        if (fallback != null && !fallback.isHls) {
-            return DownloadTarget(
-                url = fallback.url,
-                mimeType = fallback.mimeType,
-                headers = fallback.requestHeaders
-            )
+            resolvedResult.exceptionOrNull()?.let { err ->
+                throw IllegalStateException(err.message ?: "YouTube audio stream unavailable", err)
+            }
         }
 
         throw IllegalStateException("Direct downloadable audio is unavailable for this track right now")
-    }
-
-    private fun probeDirectStream(url: String, headers: Map<String, String>): Boolean {
-        return try {
-            val req = Request.Builder()
-                .url(url)
-                .header("Range", "bytes=0-1")
-                .apply {
-                    headers.forEach { (k, v) -> header(k, v) }
-                }
-                .get()
-                .build()
-            client.newCall(req).execute().use { resp ->
-                resp.isSuccessful || resp.code == 206
-            }
-        } catch (_: Exception) {
-            false
-        }
     }
 
     suspend fun removeOfflineDownload(track: Track): Result<Unit> = withContext(Dispatchers.IO) {

@@ -18,7 +18,6 @@ import com.example.data.model.SonicDnaProfile
 import com.example.data.model.SoundscapePreset
 import com.example.data.model.Track
 import com.example.data.model.TrackSourceType
-import com.example.data.remote.AudiusCatalogClient
 import com.example.data.remote.LocalTrackMetadataResolver
 import com.example.data.remote.LrclibClient
 import com.example.data.remote.LyricsPayload
@@ -45,6 +44,9 @@ import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
 
 sealed interface UiState<out T> {
     data object Loading : UiState<Nothing>
@@ -56,7 +58,6 @@ class PulseViewModel(
     private val appContext: Context,
     private val libraryRepo: LocalLibraryRepository,
     private val prefsRepo: PreferencesRepository,
-    private val audiusClient: AudiusCatalogClient,
     private val lrclibClient: LrclibClient,
     private val downloadManager: OfflineDownloadManager,
     private val safImporter: SafMusicImporter,
@@ -117,6 +118,9 @@ class PulseViewModel(
     private val _isSearching = MutableStateFlow(false)
     val isSearching: StateFlow<Boolean> = _isSearching.asStateFlow()
 
+    private val _searchError = MutableStateFlow<String?>(null)
+    val searchError: StateFlow<String?> = _searchError.asStateFlow()
+
     private val _parsedLyrics = MutableStateFlow<List<LyricLine>>(emptyList())
     val parsedLyrics: StateFlow<List<LyricLine>> = _parsedLyrics.asStateFlow()
 
@@ -145,6 +149,7 @@ class PulseViewModel(
     private var lastReportedError: String? = null
     private var lastMoodPrompt: String? = null
     private var latestFriendPosts: List<FeedPostDoc> = emptyList()
+    private val searchSeq = java.util.concurrent.atomic.AtomicLong(0L)
     private var searchJob: Job? = null
     private var likedRecsJob: Job? = null
     private var moodMixJob: Job? = null
@@ -153,6 +158,7 @@ class PulseViewModel(
 
     init {
         viewModelScope.launch {
+            libraryRepo.purgeLegacyAudiusCache()
             libraryRepo.verifyOfflineCacheIntegrity()
             if (SafMusicImporter.hasDeviceAudioPermission(appContext)) {
                 scanDeviceAudioTracks(silentIfNoPermission = true)
@@ -164,15 +170,27 @@ class PulseViewModel(
         backfillMissingLocalArtwork()
     }
 
+    private var hasLoggedInitialAuthSync = false
+
     private fun observePlaybackPreferences() {
         viewModelScope.launch {
             prefsRepo.settingsFlow.collect { current ->
                 playbackController.setCrossfadeSeconds(current.crossfadeSeconds)
                 youTubeClient.preferHighQuality = current.highResStreaming
+                val syncSource = if (!hasLoggedInitialAuthSync) "prefs_startup_restore" else "prefs_update"
                 youTubeClient.setYouTubeAuthSession(
                     cookie = current.youtubeCookie,
-                    visitorData = current.youtubeVisitorData
+                    visitorData = current.youtubeVisitorData,
+                    source = syncSource
                 )
+                val diag = youTubeClient.getAuthDiagnostics()
+                if (!hasLoggedInitialAuthSync) {
+                    hasLoggedInitialAuthSync = true
+                    Log.i(
+                        "PULSE_YT_RESOLVER",
+                        "vm_auth_restored isConnected=${current.isYouTubeConnected} authState=${diag.state} cookieCount=${diag.cookieCount} hasSapisid=${diag.hasSapisid} hasSid=${diag.hasSid} hasVisitorData=${diag.hasVisitorData}"
+                    )
+                }
                 if (!hasRestoredEqFromPrefs) {
                     hasRestoredEqFromPrefs = true
                     playbackController.restoreEqualizerState(
@@ -189,8 +207,21 @@ class PulseViewModel(
 
     fun saveYouTubeSession(cookie: String, visitorData: String, accountLabel: String) {
         viewModelScope.launch {
+            val components = YouTubeMusicClient.inspectCookieComponents(cookie)
+            Log.i(
+                "PULSE_YT_RESOLVER",
+                "vm_save_youtube_session isValid=${components.isAuthenticated} cookieCount=${components.cookieCount} hasSapisid=${components.hasSapisid} hasSid=${components.hasSid} hasVisitorData=${visitorData.isNotBlank()}"
+            )
+            if (!components.isAuthenticated) {
+                _statusMessage.value = "YouTube sign-in did not provide an authenticated session. Please try again."
+                return@launch
+            }
             prefsRepo.setYouTubeSession(cookie, visitorData, accountLabel)
-            youTubeClient.setYouTubeAuthSession(cookie, visitorData)
+            youTubeClient.setYouTubeAuthSession(
+                cookie = cookie,
+                visitorData = visitorData,
+                source = "dialog_save"
+            )
             _statusMessage.value = "YouTube account connected for streaming"
             if (playbackController.state.value.playbackError != null) {
                 playbackController.retryActiveTrack()
@@ -200,12 +231,20 @@ class PulseViewModel(
 
     fun disconnectYouTubeSession() {
         viewModelScope.launch {
-            runCatching {
-                android.webkit.CookieManager.getInstance().removeAllCookies(null)
-                android.webkit.CookieManager.getInstance().flush()
+            withTimeoutOrNull(1_500L) {
+                runCatching {
+                    suspendCancellableCoroutine { cont ->
+                        val cm = android.webkit.CookieManager.getInstance()
+                        cm.removeAllCookies {
+                            runCatching { cm.flush() }
+                            if (cont.isActive) cont.resume(Unit)
+                        }
+                    }
+                }
             }
             prefsRepo.clearYouTubeSession()
-            youTubeClient.setYouTubeAuthSession("", "")
+            youTubeClient.setYouTubeAuthSession("", "", source = "disconnect")
+            Log.i("PULSE_YT_RESOLVER", "vm_disconnect_youtube_session complete")
             _statusMessage.value = "YouTube playback session disconnected"
         }
     }
@@ -289,7 +328,7 @@ class PulseViewModel(
                                 youTubeClient.fetchLikedBasedRecommendations(
                                     likedTracks = likedTracks,
                                     preferredGenres = preferredGenres,
-                                    limit = 12
+                                    limit = 20
                                 )
                             } catch (e: CancellationException) {
                                 throw e
@@ -298,20 +337,10 @@ class PulseViewModel(
                                 emptyList()
                             }
                         }
-                        val audiusDeferred = async {
-                            try {
-                                audiusClient.fetchTrending(limit = 12)
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (e: Exception) {
-                                Log.w("PulseVM", "Audius fetch error: ${e.message}")
-                                emptyList()
-                            }
-                        }
                         fetchedYtLikedRecs = ytLikedDeferred.await()
                             .filter { it.sourceType == TrackSourceType.YOUTUBE }
                             .distinctBy { it.id }
-                        fetchedLive = (ytDeferred.await() + fetchedYtLikedRecs + audiusDeferred.await())
+                        fetchedLive = (ytDeferred.await() + fetchedYtLikedRecs)
                             .distinctBy { it.id }
                     }
                     if (fetchedLive.isNotEmpty()) {
@@ -344,28 +373,11 @@ class PulseViewModel(
                         .filter { it.sourceType == TrackSourceType.YOUTUBE })
                     .filter { it.sourceType == TrackSourceType.YOUTUBE }
                     .distinctBy { it.id }
-                    .take(10)
+                    .take(20)
 
                 _discoveryState.value = UiState.Success(
                     bundle.copy(youtubeLikedRecs = ytOnlyBento)
                 )
-
-                if (!offline) {
-                    val topYtIds = (ytOnlyBento.take(3) + bundle.heroPicks.map { it.track })
-                        .mapNotNull { track ->
-                            youTubeClient.registerTrackHint(track)
-                            track.youtubeVideoId
-                        }
-                        .distinct()
-                        .take(3)
-                    if (topYtIds.isNotEmpty()) {
-                        launch(Dispatchers.IO) {
-                            runCatching {
-                                youTubeClient.prewarmAudioStreams(topYtIds, maxConcurrent = 3)
-                            }
-                        }
-                    }
-                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -403,7 +415,7 @@ class PulseViewModel(
                 val freshYtRecs = youTubeClient.fetchLikedBasedRecommendations(
                     likedTracks = likedTracks,
                     preferredGenres = liveDna.topGenres,
-                    limit = 12
+                    limit = 20
                 )
                     .filter { it.sourceType == TrackSourceType.YOUTUBE }
                     .distinctBy { it.id }
@@ -425,7 +437,9 @@ class PulseViewModel(
 
     fun searchTracks(query: String) {
         val trimmed = query.trim()
+        val seq = searchSeq.incrementAndGet()
         searchJob?.cancel()
+        _searchError.value = null
         if (trimmed.isBlank()) {
             _searchResults.value = emptyList()
             _isSearching.value = false
@@ -451,42 +465,33 @@ class PulseViewModel(
                 }
 
                 if (isOffline) {
-                    _searchResults.value = (localMatches + roomMatches).distinctBy { it.id }
+                    if (seq == searchSeq.get()) {
+                        _searchResults.value = (localMatches + roomMatches).distinctBy { it.id }
+                        _searchError.value = null
+                    }
                     return@launch
                 }
 
-                // Publish local hits immediately while debouncing live YouTube Music + Audius queries
-                _searchResults.value = (localMatches + roomMatches).distinctBy { it.id }
-                delay(240L)
+                // Publish local hits immediately while debouncing live YouTube Music query
+                if (seq == searchSeq.get()) {
+                    _searchResults.value = (localMatches + roomMatches).distinctBy { it.id }
+                }
+                delay(260L)
 
                 val isDirectLink = YouTubeMusicClient.extractVideoId(trimmed) != null
-                val (ytMatches, audiusMatches) = coroutineScope {
-                    val ytDeferred = async {
-                        try {
-                            youTubeClient.searchMusic(trimmed, limit = 25)
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (e: Exception) {
-                            Log.w("PulseVM", "YouTube search error: ${e.message}")
-                            emptyList()
-                        }
-                    }
-                    val audiusDeferred = async {
-                        if (isDirectLink) {
-                            emptyList()
-                        } else {
-                            try {
-                                audiusClient.search(trimmed, limit = 12)
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (_: Exception) {
-                                emptyList()
-                            }
-                        }
-                    }
-                    ytDeferred.await() to audiusDeferred.await()
+                val ytOutcome = try {
+                    youTubeClient.searchMusicChecked(trimmed, limit = 25)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w("PulseVM", "YouTube search error: ${e.message}")
+                    com.example.data.remote.YouTubeSearchOutcome(
+                        tracks = emptyList(),
+                        errorMessage = YouTubeMusicClient.humanReadableSearchError(e)
+                    )
                 }
 
+                val ytMatches = ytOutcome.tracks
                 val combined = if (isDirectLink) {
                     ytMatches + localMatches + roomMatches
                 } else {
@@ -495,26 +500,21 @@ class PulseViewModel(
                             it.sourceType == TrackSourceType.LOCAL_SAF ||
                             it.sourceType == TrackSourceType.CLOUD_SAF
                     }
-                    downloadedFirst + ytMatches + localMatches + roomMatches + audiusMatches
+                    downloadedFirst + ytMatches + localMatches + roomMatches
                 }
                 val savedById = allLibraryTracks.value.associateBy { it.id } +
                     libraryRepo.getAllTracksSnapshot().associateBy { it.id }
                 val deduped = combined
                     .distinctBy { it.id }
                     .map { mergeSavedFlags(it, savedById[it.id]) }
-                _searchResults.value = deduped
-
-                // Prewarm top YouTube search hits in background so clicking plays near-instantly
-                val topYtIds = ytMatches.mapNotNull { it.youtubeVideoId }.take(3)
-                if (topYtIds.isNotEmpty()) {
-                    viewModelScope.launch(Dispatchers.IO) {
-                        runCatching {
-                            youTubeClient.prewarmAudioStreams(topYtIds, maxConcurrent = 3)
-                        }
-                    }
+                if (seq == searchSeq.get()) {
+                    _searchResults.value = deduped
+                    _searchError.value = ytOutcome.errorMessage
                 }
             } finally {
-                _isSearching.value = false
+                if (seq == searchSeq.get()) {
+                    _isSearching.value = false
+                }
             }
         }
     }
@@ -561,6 +561,7 @@ class PulseViewModel(
                 val roomSnapshot = libraryRepo.getAllTracksSnapshot()
                 val roomById = roomSnapshot.associateBy { it.id }
 
+                var ytSearchError: String? = null
                 val mixTracks: List<Track> = if (isOffline) {
                     val tokens = (cleanTitle + " " + cleanQuery)
                         .lowercase()
@@ -577,28 +578,18 @@ class PulseViewModel(
                     }
                     matched.ifEmpty { offlineTracks }
                 } else {
-                    val (ytHits, audiusHits) = coroutineScope {
-                        val ytDeferred = async {
-                            try {
-                                youTubeClient.searchMusic(cleanQuery, limit = 15)
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (e: Exception) {
-                                Log.w("PulseVM", "Mood mix YT search error: ${e.message}")
-                                emptyList()
-                            }
-                        }
-                        val audiusDeferred = async {
-                            try {
-                                audiusClient.search(cleanTitle, limit = 6)
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (_: Exception) {
-                                emptyList()
-                            }
-                        }
-                        ytDeferred.await() to audiusDeferred.await()
+                    val ytOutcome = try {
+                        youTubeClient.searchMusicChecked(cleanQuery, limit = 15)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.w("PulseVM", "Mood mix YT search error: ${e.message}")
+                        com.example.data.remote.YouTubeSearchOutcome(
+                            tracks = emptyList(),
+                            errorMessage = YouTubeMusicClient.humanReadableSearchError(e)
+                        )
                     }
+                    ytSearchError = ytOutcome.errorMessage
                     val tokens = cleanTitle.lowercase().split(Regex("[^a-z0-9]+")).filter { it.length >= 3 }
                     val localMatched = (allLibraryTracks.value + roomSnapshot)
                         .distinctBy { it.id }
@@ -610,30 +601,22 @@ class PulseViewModel(
                                     t.mood.contains(tok, true)
                             }
                         }
-                    (ytHits + audiusHits + localMatched)
+                    (ytOutcome.tracks + localMatched)
                         .distinctBy { it.id }
                         .map { mergeSavedFlags(it, roomById[it.id]) }
                 }
 
                 if (mixTracks.isEmpty()) {
                     _activeMoodMix.value = null
-                    _statusMessage.value = if (isOffline) {
-                        "No downloaded tracks match \"$cleanTitle\" in Offline Mode"
-                    } else {
-                        "Couldn't find tracks for \"$cleanTitle\""
+                    _statusMessage.value = when {
+                        isOffline -> "No downloaded tracks match \"$cleanTitle\" in Offline Mode"
+                        !ytSearchError.isNullOrBlank() -> ytSearchError
+                        else -> "Couldn't find tracks for \"$cleanTitle\""
                     }
                     return@launch
                 }
 
                 val firstTrack = mixTracks.first()
-                if (!isOffline) {
-                    val topIds = mixTracks.mapNotNull { it.youtubeVideoId }.take(3)
-                    if (topIds.isNotEmpty()) {
-                        launch(Dispatchers.IO) {
-                            runCatching { youTubeClient.prewarmAudioStreams(topIds, maxConcurrent = 3) }
-                        }
-                    }
-                }
                 startPlaybackInternal(firstTrack, mixTracks)
                 _statusMessage.value = "Playing $cleanTitle · ${firstTrack.title}"
 
@@ -917,7 +900,7 @@ class PulseViewModel(
         }
 
         if (current.artworkUrl.isBlank()) {
-            val onlineArt = audiusClient.lookupArtworkUrl(current.title, current.artist)
+            val onlineArt = metadataResolver.lookupArtworkUrl(current.title, current.artist)
             if (!onlineArt.isNullOrBlank()) current = current.copy(artworkUrl = onlineArt)
         }
 
@@ -1110,7 +1093,7 @@ class PulseViewModel(
                     safImporter.resolveEmbeddedArtwork(activeTrack.id, activeTrack.localUri)
                 } else ""
                 if (resolvedArt.isBlank() && !settings.value.offlineMode) {
-                    resolvedArt = audiusClient.lookupArtworkUrl(activeTrack.title, activeTrack.artist).orEmpty()
+                    resolvedArt = metadataResolver.lookupArtworkUrl(activeTrack.title, activeTrack.artist).orEmpty()
                 }
                 if (resolvedArt.isNotBlank()) {
                     libraryRepo.updateArtwork(activeTrack.id, resolvedArt)

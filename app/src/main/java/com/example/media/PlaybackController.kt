@@ -5,12 +5,16 @@ import android.content.Context
 import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
+import android.util.Log
+import androidx.annotation.OptIn
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
@@ -21,6 +25,7 @@ import com.example.data.model.SoundscapePreset
 import com.example.data.model.Track
 import com.example.data.remote.YouTubeMusicClient
 import com.google.common.util.concurrent.ListenableFuture
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -33,7 +38,12 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.Calendar
+import java.util.concurrent.atomic.AtomicLong
+import javax.net.ssl.SSLException
 import kotlin.math.sin
 
 data class PlaybackUiState(
@@ -59,17 +69,34 @@ data class PlaybackUiState(
     val playbackError: String? = null
 )
 
-class PlaybackController(
+private data class PendingPlayRequest(
+    val track: Track,
+    val queue: List<Track>,
+    val forceRefresh: Boolean
+)
+
+class PlaybackController internal constructor(
     private val context: Context,
-    private val signalDao: SignalDao
+    private val signalDao: SignalDao,
+    private val youtubeClient: YouTubeMusicClient = YouTubeMusicClient.shared,
+    injectedPlayer: Player? = null,
+    autoConnectController: Boolean = true
 ) {
+    constructor(context: Context, signalDao: SignalDao) : this(
+        context = context,
+        signalDao = signalDao,
+        youtubeClient = YouTubeMusicClient.shared,
+        injectedPlayer = null,
+        autoConnectController = true
+    )
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var controllerFuture: ListenableFuture<MediaController>? = null
-    private var mediaController: MediaController? = null
+    private var mediaController: Player? = null
     private var progressJob: Job? = null
     private var sleepTimerJob: Job? = null
     private var resolvePlayJob: Job? = null
-    private var pendingPlayRequest: Pair<Track, List<Track>>? = null
+    private var pendingPlayRequest: PendingPlayRequest? = null
 
     private val _state = MutableStateFlow(PlaybackUiState())
     val state: StateFlow<PlaybackUiState> = _state.asStateFlow()
@@ -84,12 +111,30 @@ class PlaybackController(
     private var fadeInStartedAtMs: Long = 0L
     private var fadeInDurationMs: Long = 0L
     private var sleepTimerEndRealtimeMs: Long? = null
+    private val playbackAttemptSeq = AtomicLong(0L)
+    private val playRequestGeneration = AtomicLong(0L)
+    @Volatile
+    private var activeCorrelationId: String = "pb-0"
+    @Volatile
+    private var hasHandedUriForCurrentAttempt: Boolean = false
+
+    internal fun cancelActiveResolutionForTest() {
+        resolvePlayJob?.cancel(CancellationException("Playback cancelled"))
+    }
 
     init {
-        connectController()
+        if (injectedPlayer != null) {
+            mediaController = injectedPlayer
+            attachPlayerListener(injectedPlayer)
+            applyCurrentDsp()
+            startProgressLoop()
+        } else if (autoConnectController) {
+            connectController()
+        }
     }
 
     private fun connectController() {
+        if (controllerFuture != null || mediaController != null) return
         val token = SessionToken(context, ComponentName(context, PulseMediaService::class.java))
         val future = MediaController.Builder(context, token).buildAsync()
         controllerFuture = future
@@ -100,31 +145,47 @@ class PlaybackController(
                 attachPlayerListener(controller)
                 applyCurrentDsp()
                 startProgressLoop()
-                pendingPlayRequest?.let { (track, queue) ->
+                pendingPlayRequest?.let { pending ->
                     pendingPlayRequest = null
-                    playTrack(track, queue)
+                    playTrack(pending.track, pending.queue, forceRefresh = pending.forceRefresh)
                 }
             } catch (_: Exception) {
-                // Controller will retry on next action
+                controllerFuture = null
             }
         }, ContextCompat.getMainExecutor(context))
     }
 
-    private fun attachPlayerListener(controller: MediaController) {
+    private fun attachPlayerListener(controller: Player) {
         controller.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (!isPlaying) {
+                    AudioSpectrumBus.setPlaybackActive(false)
+                }
                 _state.update { it.copy(isPlaying = isPlaying) }
+                val activeTrack = _state.value.currentTrack
+                if (activeTrack != null && !activeTrack.isDownloaded && activeTrack.youtubeVideoId != null) {
+                    Log.d(
+                        "PULSE_YT_RESOLVER",
+                        "stage_event corr=$activeCorrelationId stage=MEDIA3_PLAYING videoId=${activeTrack.youtubeVideoId} isPlaying=$isPlaying state=${playbackStateName(controller.playbackState)} handoffDone=$hasHandedUriForCurrentAttempt posMs=${controller.currentPosition.coerceAtLeast(0L)}"
+                    )
+                }
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 _state.update {
+                    val resolvingActive = resolvePlayJob?.isActive == true && it.playbackError == null
                     it.copy(
-                        isBuffering = playbackState == Player.STATE_BUFFERING,
-                        durationMs = controller.duration.coerceAtLeast(it.currentTrack?.durationMs ?: 0L)
+                        isBuffering = (playbackState == Player.STATE_BUFFERING) || resolvingActive,
+                        durationMs = controller.duration.takeIf { d -> d > 0L }
+                            ?: (it.currentTrack?.durationMs ?: 0L)
                     )
                 }
-                if (playbackState == Player.STATE_READY) {
-                    prewarmNextYouTubeTrack()
+                val activeTrack = _state.value.currentTrack
+                if (activeTrack != null && !activeTrack.isDownloaded && activeTrack.youtubeVideoId != null) {
+                    Log.i(
+                        "PULSE_YT_RESOLVER",
+                        "stage_event corr=$activeCorrelationId stage=MEDIA3_STATE videoId=${activeTrack.youtubeVideoId} state=${playbackStateName(playbackState)} isBuffering=${playbackState == Player.STATE_BUFFERING} handoffDone=$hasHandedUriForCurrentAttempt posMs=${controller.currentPosition.coerceAtLeast(0L)} durMs=${controller.duration}"
+                    )
                 }
                 if (playbackState == Player.STATE_ENDED) {
                     recordTrackSignal(completed = true)
@@ -154,126 +215,292 @@ class PlaybackController(
                             playbackError = null
                         )
                     }
-                    prewarmNextYouTubeTrack()
+                    // If this queue slot is still a lazy pulseyt:// URI, resolve it on-demand
+                    // so HLS mimeType & headers are attached cleanly without multi-track prewarming.
+                    val itemUriScheme = mediaItem?.localConfiguration?.uri?.scheme
+                    val videoId = nextTrack.youtubeVideoId
+                    if (!nextTrack.isDownloaded &&
+                        itemUriScheme == Track.YOUTUBE_URI_SCHEME &&
+                        videoId != null
+                    ) {
+                        val corrId = "pb-${playbackAttemptSeq.incrementAndGet()}"
+                        activeCorrelationId = corrId
+                        hasHandedUriForCurrentAttempt = false
+                        val startTsMs = System.currentTimeMillis()
+                        Log.i(
+                            "PULSE_YT_RESOLVER",
+                            "stage_event corr=$corrId stage=MEDIA3_QUEUE_TRANSITION trackId=${nextTrack.id} videoId=$videoId index=$idx reason=${transitionReasonName(reason)} hasResolvedUri=false startTsMs=$startTsMs"
+                        )
+                        resolvePlayJob?.cancel()
+                        val transitionGeneration = playRequestGeneration.incrementAndGet()
+                        _state.update { it.copy(isBuffering = true, playbackError = null) }
+                        resolvePlayJob = scope.launch {
+                            val startNs = System.nanoTime()
+                            try {
+                                val resolved = withContext(Dispatchers.IO) {
+                                    youtubeClient.ensureAuthSessionHydrated(context)
+                                    youtubeClient.resolveAudioStream(
+                                        videoId = videoId,
+                                        correlationId = corrId
+                                    )
+                                }
+                                val endTsMs = System.currentTimeMillis()
+                                val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
+                                if (!isActive ||
+                                    transitionGeneration != playRequestGeneration.get() ||
+                                    _state.value.currentTrack?.id != nextTrack.id
+                                ) {
+                                    return@launch
+                                }
+                                val stream = resolved.getOrNull()
+                                if (stream != null && idx in 0 until controller.mediaItemCount &&
+                                    controller.getMediaItemAt(idx).mediaId == nextTrack.id
+                                ) {
+                                    val resolvedMime = if (stream.isHls) MimeTypes.APPLICATION_M3U8 else null
+                                    hasHandedUriForCurrentAttempt = true
+                                    Log.i(
+                                        "PULSE_YT_RESOLVER",
+                                        "stage_event corr=$corrId stage=MEDIA3_HANDOFF source=QUEUE_TRANSITION videoId=$videoId startTsMs=$startTsMs endTsMs=$endTsMs durationMs=$elapsedMs outcome=SUCCESS isHls=${stream.isHls} format=${resolvedMime ?: stream.mimeType} host=${YouTubeMusicClient.redactHostOnly(stream.url)} queueIndex=$idx queueSize=${controller.mediaItemCount}"
+                                    )
+                                    youtubeClient.registerResolvedStreamHeaders(stream)
+                                    val alreadyPreparedHere = controller.playbackState == Player.STATE_READY &&
+                                        controller.currentMediaItemIndex == idx
+                                    if (alreadyPreparedHere) {
+                                        _state.update { it.copy(isBuffering = false) }
+                                    } else {
+                                        val updated = nextTrack.toMediaItemOrNull(
+                                            overrideUri = stream.url,
+                                            mimeType = resolvedMime
+                                        )
+                                        if (updated != null) {
+                                            val pos = controller.currentPosition.coerceAtLeast(0L)
+                                            val resumePlay = controller.playWhenReady
+                                            controller.replaceMediaItem(idx, updated)
+                                            if (pos > 0L) controller.seekTo(idx, pos)
+                                            controller.prepare()
+                                            if (resumePlay) controller.play()
+                                        }
+                                    }
+                                } else if (stream == null) {
+                                    val rawErr = resolved.exceptionOrNull()
+                                    val errMsg = rawErr?.message
+                                        ?.takeIf { it.isNotBlank() }
+                                        ?: "Audio stream unavailable"
+                                    val timedOut = rawErr is SocketTimeoutException || rawErr?.cause is SocketTimeoutException
+                                    val httpStatus = YouTubeMusicClient.extractHttpStatus(rawErr)
+                                    val origin = YouTubeMusicClient.classifyFailureOrigin(rawErr, timedOut = timedOut)
+                                    Log.w(
+                                        "PULSE_YT_RESOLVER",
+                                        "stage_event corr=$corrId stage=MEDIA3_QUEUE_TRANSITION_FAIL videoId=$videoId startTsMs=$startTsMs endTsMs=$endTsMs durationMs=$elapsedMs outcome=${if (timedOut) "TIMEOUT" else "FAILURE"} errorClass=${rawErr?.javaClass?.simpleName ?: "None"} rootCauseClass=${rawErr?.cause?.javaClass?.simpleName ?: "None"} httpStatus=$httpStatus usableStreamReturned=false isHls=false format=none cancelled=false timedOut=$timedOut failureOrigin=$origin phase=BEFORE_MEDIA3_HANDOFF msg=${YouTubeMusicClient.redactSensitiveUrls(errMsg)}"
+                                    )
+                                    controller.pause()
+                                    controller.stop()
+                                    _state.update {
+                                        it.copy(
+                                            isPlaying = false,
+                                            isBuffering = false,
+                                            positionMs = 0L,
+                                            playbackError = errMsg
+                                        )
+                                    }
+                                }
+                            } catch (e: CancellationException) {
+                                val endTsMs = System.currentTimeMillis()
+                                val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
+                                Log.i(
+                                    "PULSE_YT_RESOLVER",
+                                    "stage_event corr=$corrId stage=MEDIA3_QUEUE_TRANSITION_RESOLVE videoId=$videoId startTsMs=$startTsMs endTsMs=$endTsMs durationMs=$elapsedMs outcome=CANCELLED errorClass=CancellationException rootCauseClass=${e.cause?.javaClass?.simpleName ?: "None"} httpStatus=0 usableStreamReturned=false isHls=false format=none cancelled=true timedOut=false failureOrigin=LOCAL_APP phase=BEFORE_MEDIA3_HANDOFF"
+                                )
+                                if (transitionGeneration == playRequestGeneration.get()) {
+                                    _state.update { current ->
+                                        if (current.isBuffering || current.isPlaying) {
+                                            current.copy(isPlaying = false, isBuffering = false)
+                                        } else {
+                                            current
+                                        }
+                                    }
+                                }
+                                throw e
+                            } finally {
+                                if (transitionGeneration == playRequestGeneration.get() &&
+                                    !hasHandedUriForCurrentAttempt &&
+                                    _state.value.isBuffering
+                                ) {
+                                    _state.update { it.copy(isBuffering = false) }
+                                }
+                            }
+                        }
+                    } else if (!nextTrack.isDownloaded && videoId != null) {
+                        hasHandedUriForCurrentAttempt = true
+                        if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED) {
+                            resolvePlayJob?.cancel()
+                            playRequestGeneration.incrementAndGet()
+                            Log.i(
+                                "PULSE_YT_RESOLVER",
+                                "stage_event corr=$activeCorrelationId stage=MEDIA3_QUEUE_TRANSITION trackId=${nextTrack.id} videoId=$videoId index=$idx reason=${transitionReasonName(reason)} hasResolvedUri=true host=${YouTubeMusicClient.redactHostOnly(mediaItem?.localConfiguration?.uri?.toString())}"
+                            )
+                        }
+                    } else if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED) {
+                        resolvePlayJob?.cancel()
+                        playRequestGeneration.incrementAndGet()
+                    }
                 }
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                if (resolvePlayJob?.isActive == true && !hasHandedUriForCurrentAttempt) {
+                    return
+                }
+                val rootCause = generateSequence(error as Throwable?) { it.cause }.lastOrNull()
+                val rawRootMessage = rootCause?.message
+                    ?.takeIf { it.isNotBlank() }
+                    ?: error.localizedMessage
+                    ?: "Audio stream unavailable"
+
+                val httpStatusMatch = Regex("\\b(?:401|402|403|429)\\b")
+                val isYouTubeTrack = _state.value.currentTrack?.youtubeVideoId != null
+                val formattedPlayerError = if (
+                    isYouTubeTrack &&
+                    (httpStatusMatch.containsMatchIn(rawRootMessage) ||
+                        rawRootMessage.startsWith("Response code:", ignoreCase = true))
+                ) {
+                    YouTubeMusicClient.humanReadableExtractionError(rootCause ?: error)
+                } else {
+                    rawRootMessage
+                }
+
+                val nonRetryableYouTubeRejection = Regex("\\b(?:402|429)\\b").containsMatchIn(formattedPlayerError) ||
+                    YouTubeMusicClient.isYouTubeSignInSuggestionError(formattedPlayerError) ||
+                    formattedPlayerError.contains("no longer supported", ignoreCase = true) ||
+                    formattedPlayerError.contains("unavailable on YouTube in your region", ignoreCase = true) ||
+                    formattedPlayerError.contains("private or restricted by the uploader", ignoreCase = true) ||
+                    formattedPlayerError.contains("YouTube Music Premium", ignoreCase = true)
+
                 val activeTrack = _state.value.currentTrack
                 val activeVideoId = activeTrack?.youtubeVideoId
-                if (activeTrack != null &&
+                val willAutoRetry = !nonRetryableYouTubeRejection &&
+                    activeTrack != null &&
                     !activeTrack.isDownloaded &&
                     activeVideoId != null &&
                     (lastRetriedYouTubeId != activeVideoId || youtubeRetryCount < 1)
-                ) {
+                val httpStatus = extractMedia3HttpStatus(error).takeIf { it > 0 }
+                    ?: YouTubeMusicClient.extractHttpStatus(error)
+                val failureOrigin = classifyMedia3FailureOrigin(error, httpStatus)
+                val errorPhase = if (hasHandedUriForCurrentAttempt) {
+                    "AFTER_MEDIA3_HANDOFF"
+                } else {
+                    "BEFORE_MEDIA3_HANDOFF"
+                }
+                if (activeTrack == null || (!activeTrack.isDownloaded && activeVideoId != null)) {
+                    Log.w(
+                        "PULSE_YT_RESOLVER",
+                        "stage_event corr=$activeCorrelationId stage=MEDIA3_PLAYER_ERROR errorCode=${error.errorCodeName} errorClass=${error.javaClass.simpleName} rootCauseClass=${rootCause?.javaClass?.simpleName ?: "None"} httpStatus=$httpStatus failureOrigin=$failureOrigin phase=$errorPhase trackId=${activeTrack?.id} videoId=$activeVideoId nonRetryable=$nonRetryableYouTubeRejection willAutoRetry=$willAutoRetry msg=${YouTubeMusicClient.redactSensitiveUrls(rawRootMessage)}"
+                    )
+                }
+                if (willAutoRetry && activeTrack != null && activeVideoId != null) {
                     if (lastRetriedYouTubeId != activeVideoId) {
                         lastRetriedYouTubeId = activeVideoId
                         youtubeRetryCount = 0
                     }
                     youtubeRetryCount++
+                    val retryCorrId = "${activeCorrelationId}-r$youtubeRetryCount"
+                    activeCorrelationId = retryCorrId
+                    hasHandedUriForCurrentAttempt = false
+                    val retryStartTsMs = System.currentTimeMillis()
+                    val retryStartNs = System.nanoTime()
                     val resumePos = controller.currentPosition.coerceAtLeast(0L)
                     val idx = controller.currentMediaItemIndex.coerceAtLeast(0)
                     _state.update { it.copy(isBuffering = true, playbackError = null) }
                     resolvePlayJob?.cancel()
+                    val retryGeneration = playRequestGeneration.incrementAndGet()
                     resolvePlayJob = scope.launch {
-                        val resolved = withContext(Dispatchers.IO) {
-                            YouTubeMusicClient.shared.markStreamFailedAndInvalidate(activeVideoId)
-                            YouTubeMusicClient.shared.resolveAudioStream(
-                                videoId = activeVideoId,
-                                forceRefresh = true,
-                                trackTitle = activeTrack.title,
-                                trackArtist = activeTrack.artist,
-                                trackDurationMs = activeTrack.durationMs
-                            )
-                        }
-                        if (!isActive || _state.value.currentTrack?.id != activeTrack.id) return@launch
-                        val stream = resolved.getOrNull()
-                        if (stream != null && idx in 0 until controller.mediaItemCount) {
-                            val replacement = activeTrack.toMediaItemOrNull(
-                                overrideUri = stream.url,
-                                mimeType = if (stream.isHls) MimeTypes.APPLICATION_M3U8 else null
-                            )
-                            if (replacement != null) {
-                                controller.replaceMediaItem(idx, replacement)
-                                if (resumePos > 1_500L) {
-                                    controller.seekTo(idx, resumePos)
-                                }
-                                controller.prepare()
-                                controller.play()
+                        try {
+                            val resolved = withContext(Dispatchers.IO) {
+                                youtubeClient.ensureAuthSessionHydrated(context)
+                                youtubeClient.markStreamFailedAndInvalidate(activeVideoId)
+                                youtubeClient.resolveAudioStream(
+                                    videoId = activeVideoId,
+                                    forceRefresh = true,
+                                    correlationId = retryCorrId
+                                )
+                            }
+                            val retryEndTsMs = System.currentTimeMillis()
+                            val retryElapsedMs = (System.nanoTime() - retryStartNs) / 1_000_000L
+                            if (!isActive ||
+                                retryGeneration != playRequestGeneration.get() ||
+                                _state.value.currentTrack?.id != activeTrack.id
+                            ) {
                                 return@launch
                             }
-                        }
-                        val errMsg = resolved.exceptionOrNull()?.message
-                            ?.takeIf { it.isNotBlank() }
-                            ?: "Audio stream unavailable"
-                        _state.update {
-                            it.copy(
-                                isPlaying = false,
-                                isBuffering = false,
-                                playbackError = errMsg
+                            val stream = resolved.getOrNull()
+                            if (stream != null && idx in 0 until controller.mediaItemCount) {
+                                val resolvedMime = if (stream.isHls) MimeTypes.APPLICATION_M3U8 else null
+                                hasHandedUriForCurrentAttempt = true
+                                Log.i(
+                                    "PULSE_YT_RESOLVER",
+                                    "stage_event corr=$retryCorrId stage=MEDIA3_HANDOFF source=PLAYER_ERROR_RETRY videoId=$activeVideoId startTsMs=$retryStartTsMs endTsMs=$retryEndTsMs durationMs=$retryElapsedMs outcome=SUCCESS isHls=${stream.isHls} format=${resolvedMime ?: stream.mimeType} host=${YouTubeMusicClient.redactHostOnly(stream.url)} queueIndex=$idx queueSize=${controller.mediaItemCount}"
+                                )
+                                youtubeClient.registerResolvedStreamHeaders(stream)
+                                val replacement = activeTrack.toMediaItemOrNull(
+                                    overrideUri = stream.url,
+                                    mimeType = resolvedMime
+                                )
+                                if (replacement != null) {
+                                    controller.replaceMediaItem(idx, replacement)
+                                    if (resumePos > 1_500L) {
+                                        controller.seekTo(idx, resumePos)
+                                    }
+                                    controller.prepare()
+                                    controller.play()
+                                    return@launch
+                                }
+                            }
+                            val rawRetryErr = resolved.exceptionOrNull()
+                            val errMsg = rawRetryErr?.message
+                                ?.takeIf { it.isNotBlank() }
+                                ?: formattedPlayerError
+                            Log.w(
+                                "PULSE_YT_RESOLVER",
+                                "stage_event corr=$retryCorrId stage=PLAYBACK_RETRY_FAIL videoId=$activeVideoId startTsMs=$retryStartTsMs endTsMs=$retryEndTsMs durationMs=$retryElapsedMs outcome=FAILURE errorClass=${rawRetryErr?.javaClass?.simpleName ?: "None"} httpStatus=${YouTubeMusicClient.extractHttpStatus(rawRetryErr)} failureOrigin=${YouTubeMusicClient.classifyFailureOrigin(rawRetryErr)} phase=BEFORE_MEDIA3_HANDOFF msg=${YouTubeMusicClient.redactSensitiveUrls(errMsg)}"
                             )
+                            _state.update {
+                                it.copy(
+                                    isPlaying = false,
+                                    isBuffering = false,
+                                    playbackError = errMsg
+                                )
+                            }
+                        } catch (e: CancellationException) {
+                            if (retryGeneration == playRequestGeneration.get()) {
+                                _state.update { current ->
+                                    if (current.isBuffering || current.isPlaying) {
+                                        current.copy(isPlaying = false, isBuffering = false)
+                                    } else {
+                                        current
+                                    }
+                                }
+                            }
+                            throw e
+                        } finally {
+                            if (retryGeneration == playRequestGeneration.get() &&
+                                !hasHandedUriForCurrentAttempt &&
+                                _state.value.isBuffering
+                            ) {
+                                _state.update { it.copy(isBuffering = false) }
+                            }
                         }
                     }
                     return
                 }
-                val rootMessage = generateSequence(error as Throwable?) { it.cause }
-                    .lastOrNull()
-                    ?.message
-                    ?.takeIf { it.isNotBlank() }
-                    ?: error.localizedMessage
-                    ?: "Audio stream unavailable"
                 _state.update {
                     it.copy(
                         isPlaying = false,
                         isBuffering = false,
-                        playbackError = rootMessage
+                        playbackError = formattedPlayerError
                     )
                 }
             }
         })
-    }
-
-    private fun prewarmNextYouTubeTrack() {
-        val currentState = _state.value
-        val upcomingEntries = (1..2).mapNotNull { offset ->
-            val idx = currentState.currentIndex + offset
-            val track = currentState.queue.getOrNull(idx)
-            val videoId = if (track != null && !track.isDownloaded) track.youtubeVideoId else null
-            if (track != null && videoId != null) Triple(idx, track, videoId) else null
-        }
-        if (upcomingEntries.isEmpty()) return
-        scope.launch(Dispatchers.IO) {
-            upcomingEntries.forEach { YouTubeMusicClient.shared.registerTrackHint(it.second) }
-            runCatching {
-                YouTubeMusicClient.shared.prewarmAudioStreams(
-                    upcomingEntries.map { it.third },
-                    maxConcurrent = 2
-                )
-            }
-            for ((idx, track, videoId) in upcomingEntries) {
-                val stream = YouTubeMusicClient.shared.resolveAudioStream(
-                    videoId = videoId,
-                    trackTitle = track.title,
-                    trackArtist = track.artist,
-                    trackDurationMs = track.durationMs
-                ).getOrNull() ?: continue
-                withContext(Dispatchers.Main.immediate) {
-                    val controller = mediaController ?: return@withContext
-                    if (idx in 0 until controller.mediaItemCount &&
-                        idx != controller.currentMediaItemIndex &&
-                        controller.getMediaItemAt(idx).mediaId == track.id
-                    ) {
-                        val updatedItem = track.toMediaItemOrNull(
-                            overrideUri = stream.url,
-                            mimeType = if (stream.isHls) MimeTypes.APPLICATION_M3U8 else null
-                        )
-                        if (updatedItem != null) {
-                            controller.replaceMediaItem(idx, updatedItem)
-                        }
-                    }
-                }
-            }
-        }
     }
 
     private fun startProgressLoop() {
@@ -281,19 +508,37 @@ class PlaybackController(
         progressJob = scope.launch {
             while (true) {
                 val controller = mediaController
-                val playing = controller?.isPlaying == true
-                if (controller != null) {
+                val hasError = _state.value.playbackError != null
+                val resolving = resolvePlayJob?.isActive == true
+                val playing = !hasError && !resolving && controller?.isPlaying == true
+                if (controller != null && !hasError && !resolving) {
                     val pos = controller.currentPosition.coerceAtLeast(0L)
                     if (pos > maxPositionReachedMs) maxPositionReachedMs = pos
                     val dur = controller.duration.takeIf { it > 0 }
                         ?: _state.value.currentTrack?.durationMs ?: 180_000L
-                    val bpm = (_state.value.currentTrack?.bpm ?: 118).coerceIn(60, 200)
-                    val beatDurationMs = 60_000.0 / bpm
-                    val rawPhase = ((pos % beatDurationMs) / beatDurationMs).toFloat().coerceIn(0f, 1f)
-                    val beatAngle = (pos / beatDurationMs) * Math.PI * 2.0
-                    val energy = if (playing) {
-                        ((sin(beatAngle) * 0.35 + 0.65).toFloat()).coerceIn(0.2f, 1.0f)
-                    } else 0.14f
+                    val audioFrame = if (playing) {
+                        AudioSpectrumBus.sampleNow(isPlaying = true)
+                    } else {
+                        AudioVisualizerFrame.EMPTY
+                    }
+                    val (energy, rawPhase) = if (!playing) {
+                        0.12f to 0f
+                    } else if (audioFrame.isLive) {
+                        val liveEnergy = (
+                            0.16f +
+                                audioFrame.bassEnergy * 0.48f +
+                                audioFrame.overallEnergy * 0.24f +
+                                audioFrame.beatImpulse * 0.26f
+                            ).coerceIn(0.16f, 1.0f)
+                        liveEnergy to audioFrame.beatPhase
+                    } else {
+                        val bpm = (_state.value.currentTrack?.bpm ?: 118).coerceIn(60, 200)
+                        val beatDurationMs = 60_000.0 / bpm
+                        val fallbackPhase = ((pos % beatDurationMs) / beatDurationMs).toFloat().coerceIn(0f, 1f)
+                        val beatAngle = (pos / beatDurationMs) * Math.PI * 2.0
+                        val fallbackEnergy = ((sin(beatAngle) * 0.25 + 0.55).toFloat()).coerceIn(0.2f, 0.85f)
+                        fallbackEnergy to fallbackPhase
+                    }
 
                     applyCrossfadeEnvelope(controller, playing, pos, dur)
 
@@ -303,8 +548,19 @@ class PlaybackController(
                             durationMs = dur,
                             isPlaying = playing,
                             beatPulseEnergy = energy,
-                            beatPhase = if (playing) rawPhase else 0f
+                            beatPhase = rawPhase
                         )
+                    }
+                } else if (hasError) {
+                    _state.update {
+                        if (it.isPlaying || it.isBuffering || it.beatPhase != 0f) {
+                            it.copy(
+                                isPlaying = false,
+                                isBuffering = false,
+                                beatPulseEnergy = 0.12f,
+                                beatPhase = 0f
+                            )
+                        } else it
                     }
                 }
                 delay(if (playing) 50L else 180L)
@@ -312,7 +568,7 @@ class PlaybackController(
         }
     }
 
-    private fun triggerFadeInIfEnabled(controller: MediaController?) {
+    private fun triggerFadeInIfEnabled(controller: Player?) {
         val crossfadeMs = _state.value.crossfadeSeconds * 1000L
         if (crossfadeMs > 0L) {
             fadeInDurationMs = (crossfadeMs / 2L).coerceIn(400L, 6000L)
@@ -325,7 +581,7 @@ class PlaybackController(
     }
 
     private fun applyCrossfadeEnvelope(
-        controller: MediaController,
+        controller: Player,
         playing: Boolean,
         positionMs: Long,
         durationMs: Long
@@ -461,8 +717,16 @@ class PlaybackController(
         }
     }
 
-    fun playTrack(track: Track, queue: List<Track> = listOf(track)) {
+    fun playTrack(
+        track: Track,
+        queue: List<Track> = listOf(track),
+        forceRefresh: Boolean = false
+    ) {
+        val requestGeneration = playRequestGeneration.incrementAndGet()
         resolvePlayJob?.cancel()
+        resolvePlayJob = null
+        hasHandedUriForCurrentAttempt = false
+        AudioSpectrumBus.clearPendingQueue()
         val safeQueue = if (queue.any { it.id == track.id }) queue else listOf(track) + queue
         val targetIndex = safeQueue.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
 
@@ -488,15 +752,19 @@ class PlaybackController(
                 currentTrack = track,
                 queue = safeQueue,
                 currentIndex = targetIndex,
+                positionMs = 0L,
                 durationMs = track.durationMs,
+                isPlaying = false,
                 isBuffering = needsRemoteResolution,
+                beatPulseEnergy = 0.14f,
+                beatPhase = 0f,
                 playbackError = null
             )
         }
 
         val controller = mediaController
         if (controller == null) {
-            pendingPlayRequest = track to safeQueue
+            pendingPlayRequest = PendingPlayRequest(track, safeQueue, forceRefresh)
             connectController()
             return
         }
@@ -504,8 +772,11 @@ class PlaybackController(
         if (!needsRemoteResolution) {
             val mediaItems = safeQueue.mapNotNull { it.toMediaItemOrNull() }
             if (mediaItems.isEmpty()) {
+                controller.pause()
+                controller.stop()
+                controller.clearMediaItems()
                 _state.update {
-                    it.copy(isBuffering = false, playbackError = "No playable audio URI for this track")
+                    it.copy(isPlaying = false, isBuffering = false, positionMs = 0L, playbackError = "No playable audio URI for this track")
                 }
                 return
             }
@@ -517,66 +788,144 @@ class PlaybackController(
             return
         }
 
+        // Stop any previous track so prior audio/position does not bleed into a resolving or failed track
+        controller.pause()
+        controller.stop()
+        controller.clearMediaItems()
+
         val videoId = track.youtubeVideoId!!
-        YouTubeMusicClient.shared.registerTrackHint(track)
+        val corrId = "pb-${playbackAttemptSeq.incrementAndGet()}"
+        activeCorrelationId = corrId
+        val reqStartTsMs = System.currentTimeMillis()
         resolvePlayJob = scope.launch {
-            val resolved = withContext(Dispatchers.IO) {
-                YouTubeMusicClient.shared.resolveAudioStream(
-                    videoId = videoId,
-                    trackTitle = track.title,
-                    trackArtist = track.artist,
-                    trackDurationMs = track.durationMs
+            val startNs = System.nanoTime()
+            try {
+                val resolved = withContext(Dispatchers.IO) {
+                    youtubeClient.ensureAuthSessionHydrated(context)
+                    val diag = youtubeClient.getAuthDiagnostics()
+                    Log.i(
+                        "PULSE_YT_RESOLVER",
+                        "stage_event corr=$corrId stage=PLAYBACK_REQUEST trackId=${track.id} videoId=$videoId startTsMs=$reqStartTsMs sourceType=${track.sourceType} isDownloaded=${track.isDownloaded} forceRefresh=$forceRefresh queueSize=${safeQueue.size} authState=${diag.state} hasAuthSession=${youtubeClient.hasAuthenticatedYouTubeSession()}"
+                    )
+                    youtubeClient.resolveAudioStream(
+                        videoId = videoId,
+                        forceRefresh = forceRefresh,
+                        correlationId = corrId
+                    )
+                }
+                val endTsMs = System.currentTimeMillis()
+                val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
+                if (!isActive ||
+                    requestGeneration != playRequestGeneration.get() ||
+                    _state.value.currentTrack?.id != track.id
+                ) {
+                    return@launch
+                }
+
+                val stream = resolved.getOrNull()
+                if (stream == null) {
+                    val rawErr = resolved.exceptionOrNull()
+                    val errMsg = rawErr?.message
+                        ?.takeIf { it.isNotBlank() }
+                        ?: "Audio stream unavailable"
+                    val timedOut = rawErr is SocketTimeoutException || rawErr?.cause is SocketTimeoutException
+                    val httpStatus = YouTubeMusicClient.extractHttpStatus(rawErr)
+                    val origin = YouTubeMusicClient.classifyFailureOrigin(rawErr, timedOut = timedOut)
+                    Log.w(
+                        "PULSE_YT_RESOLVER",
+                        "stage_event corr=$corrId stage=PLAYBACK_REQUEST trackId=${track.id} videoId=$videoId startTsMs=$reqStartTsMs endTsMs=$endTsMs durationMs=$elapsedMs outcome=${if (timedOut) "TIMEOUT" else "FAILURE"} errorClass=${rawErr?.javaClass?.simpleName ?: "None"} rootCauseClass=${rawErr?.cause?.javaClass?.simpleName ?: "None"} httpStatus=$httpStatus usableStreamReturned=false isHls=false format=none cancelled=false timedOut=$timedOut failureOrigin=$origin phase=BEFORE_MEDIA3_HANDOFF msg=${YouTubeMusicClient.redactSensitiveUrls(errMsg)}"
+                    )
+                    _state.update {
+                        it.copy(
+                            isPlaying = false,
+                            isBuffering = false,
+                            positionMs = 0L,
+                            playbackError = errMsg
+                        )
+                    }
+                    return@launch
+                }
+
+                val resolvedMime = if (stream.isHls) MimeTypes.APPLICATION_M3U8 else null
+                youtubeClient.registerResolvedStreamHeaders(stream)
+                val mediaItems = safeQueue.mapIndexedNotNull { idx, item ->
+                    if (idx == targetIndex) {
+                        item.toMediaItemOrNull(
+                            overrideUri = stream.url,
+                            mimeType = resolvedMime
+                        )
+                    } else {
+                        item.toMediaItemOrNull()
+                    }
+                }
+                if (mediaItems.isEmpty()) {
+                    Log.w(
+                        "PULSE_YT_RESOLVER",
+                        "stage_event corr=$corrId stage=PLAYBACK_REQUEST trackId=${track.id} videoId=$videoId startTsMs=$reqStartTsMs endTsMs=$endTsMs durationMs=$elapsedMs outcome=FAILURE errorClass=IllegalStateException httpStatus=0 usableStreamReturned=false isHls=${stream.isHls} format=${resolvedMime ?: stream.mimeType} cancelled=false timedOut=false failureOrigin=LOCAL_APP phase=BEFORE_MEDIA3_HANDOFF msg=empty_media_items"
+                    )
+                    _state.update {
+                        it.copy(isPlaying = false, isBuffering = false, positionMs = 0L, playbackError = "No playable audio URI for this track")
+                    }
+                    return@launch
+                }
+                val safeIdx = targetIndex.coerceIn(0, mediaItems.lastIndex)
+                hasHandedUriForCurrentAttempt = true
+                Log.i(
+                    "PULSE_YT_RESOLVER",
+                    "stage_event corr=$corrId stage=MEDIA3_HANDOFF source=PLAY_TRACK trackId=${track.id} videoId=$videoId startTsMs=$reqStartTsMs endTsMs=$endTsMs durationMs=$elapsedMs outcome=SUCCESS isHls=${stream.isHls} format=${resolvedMime ?: stream.mimeType} host=${YouTubeMusicClient.redactHostOnly(stream.url)} queueIndex=$safeIdx queueSize=${mediaItems.size}"
                 )
-            }
-            if (!isActive || _state.value.currentTrack?.id != track.id) return@launch
-
-            val stream = resolved.getOrNull()
-            if (stream == null) {
-                val errMsg = resolved.exceptionOrNull()?.message
-                    ?.takeIf { it.isNotBlank() }
-                    ?: "Audio stream unavailable"
-                _state.update {
-                    it.copy(
-                        isPlaying = false,
-                        isBuffering = false,
-                        playbackError = errMsg
-                    )
+                triggerFadeInIfEnabled(controller)
+                controller.setMediaItems(mediaItems, safeIdx, 0L)
+                controller.prepare()
+                controller.play()
+            } catch (e: CancellationException) {
+                val endTsMs = System.currentTimeMillis()
+                val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
+                Log.i(
+                    "PULSE_YT_RESOLVER",
+                    "stage_event corr=$corrId stage=PLAYBACK_REQUEST trackId=${track.id} videoId=$videoId startTsMs=$reqStartTsMs endTsMs=$endTsMs durationMs=$elapsedMs outcome=CANCELLED errorClass=CancellationException rootCauseClass=${e.cause?.javaClass?.simpleName ?: "None"} httpStatus=0 usableStreamReturned=false isHls=false format=none cancelled=true timedOut=false failureOrigin=LOCAL_APP phase=BEFORE_MEDIA3_HANDOFF"
+                )
+                if (requestGeneration == playRequestGeneration.get()) {
+                    _state.update { current ->
+                        if (current.isBuffering || current.isPlaying) {
+                            current.copy(isPlaying = false, isBuffering = false)
+                        } else {
+                            current
+                        }
+                    }
                 }
-                return@launch
-            }
-
-            val mediaItems = safeQueue.mapIndexedNotNull { idx, item ->
-                if (idx == targetIndex) {
-                    item.toMediaItemOrNull(
-                        overrideUri = stream.url,
-                        mimeType = if (stream.isHls) MimeTypes.APPLICATION_M3U8 else null
-                    )
-                } else {
-                    item.toMediaItemOrNull()
+                throw e
+            } finally {
+                if (requestGeneration == playRequestGeneration.get() &&
+                    !hasHandedUriForCurrentAttempt &&
+                    _state.value.isBuffering
+                ) {
+                    _state.update { it.copy(isBuffering = false) }
                 }
             }
-            if (mediaItems.isEmpty()) {
-                _state.update {
-                    it.copy(isBuffering = false, playbackError = "No playable audio URI for this track")
-                }
-                return@launch
-            }
-            val safeIdx = targetIndex.coerceIn(0, mediaItems.lastIndex)
-            triggerFadeInIfEnabled(controller)
-            controller.setMediaItems(mediaItems, safeIdx, 0L)
-            controller.prepare()
-            controller.play()
         }
     }
 
     fun retryActiveTrack() {
         val track = _state.value.currentTrack ?: return
         val queue = _state.value.queue.ifEmpty { listOf(track) }
-        playTrack(track, queue)
+        val shouldForceRefresh = _state.value.playbackError != null
+        playTrack(track, queue, forceRefresh = shouldForceRefresh)
     }
 
     fun togglePlayPause() {
+        if (_state.value.playbackError != null) {
+            retryActiveTrack()
+            return
+        }
+        if (resolvePlayJob?.isActive == true) {
+            return
+        }
         val controller = mediaController ?: return
+        if (controller.mediaItemCount == 0 && _state.value.currentTrack != null) {
+            retryActiveTrack()
+            return
+        }
         if (controller.isPlaying) controller.pause() else controller.play()
     }
 
@@ -755,7 +1104,7 @@ class PlaybackController(
     }
 
     private fun applyCurrentDsp() {
-        val controller = mediaController ?: return
+        val controller = mediaController as? MediaController ?: return
         val s = _state.value
         val args = Bundle().apply {
             putBoolean(PulseMediaService.EXTRA_EQ_ENABLED, s.eqEnabled)
@@ -855,10 +1204,68 @@ class PlaybackController(
             .build()
     }
 
+    private fun playbackStateName(state: Int): String = when (state) {
+        Player.STATE_IDLE -> "IDLE"
+        Player.STATE_BUFFERING -> "BUFFERING"
+        Player.STATE_READY -> "READY"
+        Player.STATE_ENDED -> "ENDED"
+        else -> "UNKNOWN($state)"
+    }
+
+    private fun transitionReasonName(reason: Int): String = when (reason) {
+        Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT -> "REPEAT"
+        Player.MEDIA_ITEM_TRANSITION_REASON_AUTO -> "AUTO"
+        Player.MEDIA_ITEM_TRANSITION_REASON_SEEK -> "SEEK"
+        Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED -> "PLAYLIST_CHANGED"
+        else -> "UNKNOWN($reason)"
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun extractMedia3HttpStatus(error: Throwable?): Int {
+        var cur = error
+        var depth = 0
+        while (cur != null && depth < 10) {
+            if (cur is HttpDataSource.InvalidResponseCodeException) {
+                return cur.responseCode
+            }
+            cur = cur.cause
+            depth++
+        }
+        return 0
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun classifyMedia3FailureOrigin(error: PlaybackException, httpStatus: Int): String {
+        if (httpStatus >= 400) return "UPSTREAM_SERVER"
+        var cur: Throwable? = error
+        var depth = 0
+        while (cur != null && depth < 10) {
+            when (cur) {
+                is HttpDataSource.InvalidResponseCodeException -> return "UPSTREAM_SERVER"
+                is HttpDataSource.HttpDataSourceException,
+                is SocketTimeoutException,
+                is UnknownHostException,
+                is ConnectException,
+                is SSLException -> return "NETWORK_OR_TIMEOUT"
+            }
+            cur = cur.cause
+            depth++
+        }
+        return if (error.errorCodeName.contains("PARSING", ignoreCase = true)) {
+            "EXTRACTOR"
+        } else {
+            "LOCAL_APP"
+        }
+    }
+
     fun release() {
+        playRequestGeneration.incrementAndGet()
         resolvePlayJob?.cancel()
+        resolvePlayJob = null
         progressJob?.cancel()
         sleepTimerJob?.cancel()
+        AudioSpectrumBus.reset()
+        _state.update { it.copy(isBuffering = false, isPlaying = false) }
         controllerFuture?.let { MediaController.releaseFuture(it) }
     }
 }

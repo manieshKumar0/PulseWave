@@ -302,6 +302,10 @@ class LocalLibraryRepository(
         trackDao.clearRemoteMetadataCache()
     }
 
+    suspend fun purgeLegacyAudiusCache(): Int = withContext(Dispatchers.IO) {
+        trackDao.purgeLegacyAudiusCache()
+    }
+
     suspend fun getRecentSignals(): List<ListeningSignalEntity> = withContext(Dispatchers.IO) {
         signalDao.getRecentSignals()
     }

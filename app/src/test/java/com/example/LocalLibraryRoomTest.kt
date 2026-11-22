@@ -191,4 +191,47 @@ class LocalLibraryRoomTest {
         assertEquals("", cleaned.cachedArtworkPath)
         assertEquals(0L, repo.cacheSummary.first().totalBytesUsed)
     }
+
+    @Test
+    fun purgeLegacyAudiusCache_removesOnlyStaleRemoteAudiusRows() = runTest {
+        val staleAudiusTrack = Track(
+            id = "audius_legacy_99",
+            title = "Old Audius Remix",
+            artist = "DJ Legacy",
+            streamUrl = "https://api.audius.co/v1/tracks/99/stream",
+            sourceType = TrackSourceType.STREAM,
+            isDownloaded = false
+        )
+        val localTrack = Track(
+            id = "device_ms_42",
+            title = "Local Song",
+            artist = "My Band",
+            localUri = "content://media/audio/42",
+            sourceType = TrackSourceType.LOCAL_SAF
+        )
+        val ytTrack = Track(
+            id = "yt_NJAv_7lHUIU",
+            title = "Kesariya",
+            artist = "Arijit Singh",
+            sourceType = TrackSourceType.YOUTUBE
+        )
+        val downloadedTrack = Track(
+            id = "audius_dl_1",
+            title = "Saved Offline",
+            artist = "Archive",
+            downloadedFilePath = "/tmp/saved.mp3",
+            isDownloaded = true,
+            sourceType = TrackSourceType.STREAM
+        )
+
+        repo.upsertAll(listOf(staleAudiusTrack, localTrack, ytTrack, downloadedTrack))
+        val purgedCount = repo.purgeLegacyAudiusCache()
+        assertEquals(1, purgedCount)
+
+        val remainingIds = repo.allTracks.first().map { it.id }.toSet()
+        assertFalse("audius_legacy_99" in remainingIds)
+        assertTrue("device_ms_42" in remainingIds)
+        assertTrue("yt_NJAv_7lHUIU" in remainingIds)
+        assertTrue("audius_dl_1" in remainingIds)
+    }
 }

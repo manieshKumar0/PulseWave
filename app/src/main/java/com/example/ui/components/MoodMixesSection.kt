@@ -940,7 +940,7 @@ private fun SparklePairGlyph(
 }
 
 @Composable
-private fun MoodStrokeGlyph(
+internal fun MoodStrokeGlyph(
     kind: MoodArtworkKind,
     modifier: Modifier = Modifier
 ) {
@@ -1064,7 +1064,7 @@ private fun Color.withMoodTone(grayAmount: Float): Color {
     return Color(r, g, b, alpha)
 }
 
-private fun DrawScope.drawMoodScene(kind: MoodArtworkKind, grayAmount: Float) {
+internal fun DrawScope.drawMoodScene(kind: MoodArtworkKind, grayAmount: Float) {
     val sx = size.width / 172f
     val sy = size.height / 196f
     fun c(hex: Long): Color = Color(hex).withMoodTone(grayAmount)

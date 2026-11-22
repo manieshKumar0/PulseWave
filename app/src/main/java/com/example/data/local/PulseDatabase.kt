@@ -200,6 +200,14 @@ interface TrackDao {
     )
     suspend fun clearRemoteMetadataCache(): Int
 
+    @Query(
+        "DELETE FROM tracks " +
+            "WHERE isDownloaded = 0 " +
+            "AND sourceType NOT IN ('LOCAL_SAF', 'CLOUD_SAF') " +
+            "AND (id LIKE 'audius_%' OR LOWER(streamUrl) LIKE '%audius.co%')"
+    )
+    suspend fun purgeLegacyAudiusCache(): Int
+
     @Query("DELETE FROM tracks WHERE id = :trackId")
     suspend fun deleteTrack(trackId: String)
 

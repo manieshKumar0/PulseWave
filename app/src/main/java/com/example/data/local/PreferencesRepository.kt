@@ -1,6 +1,7 @@
 package com.example.data.local
 
 import android.content.Context
+import android.util.Log
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -9,6 +10,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.data.model.DefaultSoundscapes
+import com.example.data.remote.YouTubeMusicClient
 import com.example.ui.theme.ThemeMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -31,8 +33,7 @@ data class UserAppSettings(
     val youtubeAccountLabel: String = ""
 ) {
     val isYouTubeConnected: Boolean
-        get() = youtubeCookie.isNotBlank() &&
-            (youtubeCookie.contains("SAPISID=") || youtubeCookie.contains("__Secure-3PAPISID="))
+        get() = YouTubeMusicClient.isValidAuthenticatedCookie(youtubeCookie)
 }
 
 class PreferencesRepository(private val context: Context) {
@@ -126,11 +127,18 @@ class PreferencesRepository(private val context: Context) {
         visitorData: String,
         accountLabel: String
     ) {
+        val cleanCookie = cookie.trim()
+        val cleanVisitor = visitorData.trim()
+        val summary = YouTubeMusicClient.inspectCookieComponents(cleanCookie)
         context.pulseDataStore.edit { prefs ->
-            prefs[Keys.YOUTUBE_COOKIE] = cookie.trim()
-            prefs[Keys.YOUTUBE_VISITOR_DATA] = visitorData.trim()
+            prefs[Keys.YOUTUBE_COOKIE] = cleanCookie
+            prefs[Keys.YOUTUBE_VISITOR_DATA] = cleanVisitor
             prefs[Keys.YOUTUBE_ACCOUNT_LABEL] = accountLabel.trim()
         }
+        Log.i(
+            "PULSE_YT_RESOLVER",
+            "prefs_session_saved isValid=${summary.isAuthenticated} cookieCount=${summary.cookieCount} hasSapisid=${summary.hasSapisid} hasSid=${summary.hasSid} hasVisitorData=${cleanVisitor.isNotBlank()}"
+        )
     }
 
     suspend fun clearYouTubeSession() {
@@ -139,5 +147,6 @@ class PreferencesRepository(private val context: Context) {
             prefs.remove(Keys.YOUTUBE_VISITOR_DATA)
             prefs.remove(Keys.YOUTUBE_ACCOUNT_LABEL)
         }
+        Log.i("PULSE_YT_RESOLVER", "prefs_session_cleared")
     }
 }

@@ -406,7 +406,8 @@ private fun PlayerTab(
             secondaryColor = UltravioletPulse,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(48.dp)
+                .height(52.dp)
+                .testTag("now_playing_visualizer")
         )
 
         Column(

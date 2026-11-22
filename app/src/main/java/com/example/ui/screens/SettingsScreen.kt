@@ -74,7 +74,7 @@ import androidx.compose.ui.graphics.Color
 import com.example.ui.components.EqualizerControlPanel
 import com.example.ui.components.GoogleGLogo
 import com.example.ui.components.ObsidianGlassCard
-import com.example.ui.components.PulseWaveBrandLogo
+import com.example.ui.components.PulseScreenHeader
 import com.example.ui.theme.MintElectric
 import com.example.ui.theme.ThemeMode
 import com.example.ui.theme.UltravioletPulse
@@ -149,23 +149,10 @@ fun SettingsScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                PulseWaveBrandLogo(size = 38.dp)
-                Column {
-                    Text(
-                        text = "Settings",
-                        style = MaterialTheme.typography.headlineLarge
-                    )
-                    Text(
-                        text = "Appearance, offline vault, audio sources & account",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-            }
+            PulseScreenHeader(
+                title = "Settings",
+                titleTestTag = "settings_header_title"
+            )
         }
 
         // 1. Account & Sync Summary
@@ -386,9 +373,9 @@ fun SettingsScreen(
                                 Text("YouTube Playback Session", style = MaterialTheme.typography.titleMedium)
                                 Text(
                                     text = if (settings.isYouTubeConnected) {
-                                        settings.youtubeAccountLabel.ifBlank { "Connected · passes YouTube bot checks" }
+                                        settings.youtubeAccountLabel.ifBlank { "Connected · signed-in YouTube session saved" }
                                     } else {
-                                        "Optional sign-in if mobile/Wi-Fi IP hits bot check"
+                                        "Optional sign-in for age-restricted or network-gated playback"
                                     },
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant

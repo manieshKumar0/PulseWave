@@ -112,6 +112,12 @@ class LocalTrackMetadataResolver {
         }
     }
 
+    suspend fun lookupArtworkUrl(title: String, artist: String): String? {
+        return resolveMetadata(rawTitle = title, rawArtist = artist, durationMs = 0L)
+            ?.artworkUrl
+            ?.takeIf { it.isNotBlank() }
+    }
+
     private fun isPlaceholderArtist(artist: String): Boolean {
         val norm = artist.trim().lowercase()
         return norm.isBlank() ||

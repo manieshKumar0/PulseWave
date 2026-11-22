@@ -1,25 +1,44 @@
 package com.example.media
 
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
 import android.media.audiofx.BassBoost
 import android.media.audiofx.Equalizer
 import android.media.audiofx.PresetReverb
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.ResolvingDataSource
+import androidx.media3.datasource.TransferListener
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioSink
+import androidx.media3.exoplayer.audio.TeeAudioProcessor
+import androidx.media3.exoplayer.drm.DrmSessionManagerProvider
+import androidx.media3.exoplayer.hls.HlsMediaSource
+import androidx.media3.exoplayer.source.CompositeMediaSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import androidx.media3.session.CommandButton
+import androidx.media3.exoplayer.source.MediaPeriod
+import androidx.media3.exoplayer.source.MediaSource
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.exoplayer.upstream.Allocator
+import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
@@ -27,16 +46,26 @@ import androidx.media3.session.SessionResult
 import com.example.MainActivity
 import com.example.data.model.DefaultSoundscapes
 import com.example.data.model.Track
+import com.example.data.remote.ResolvedAudioStream
 import com.example.data.remote.YouTubeMusicClient
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
 
 class PulseMediaService : MediaSessionService() {
 
     private var player: ExoPlayer? = null
     private var mediaSession: MediaSession? = null
+    private var pulseMediaSourceFactory: PulseMediaSourceFactory? = null
 
     private var equalizer: Equalizer? = null
     private var bassBoost: BassBoost? = null
@@ -74,13 +103,39 @@ class PulseMediaService : MediaSessionService() {
             if (uri.scheme == Track.YOUTUBE_URI_SCHEME) {
                 val videoId = YouTubeMusicClient.extractVideoId(uri.toString())
                     ?: throw IOException("Invalid YouTube track URI")
+                val corrId = YouTubeMusicClient.shared.latestCorrelationIdFor(videoId)
+                val startTsMs = System.currentTimeMillis()
+                val startNs = System.nanoTime()
                 val resolved = runBlocking {
-                    YouTubeMusicClient.shared.resolveAudioStream(videoId)
+                    YouTubeMusicClient.shared.ensureAuthSessionHydrated(this@PulseMediaService)
+                    val diag = YouTubeMusicClient.shared.getAuthDiagnostics()
+                    Log.d(
+                        "PULSE_YT_RESOLVER",
+                        "stage_event corr=$corrId stage=MEDIA_SERVICE_DATASOURCE_START videoId=$videoId startTsMs=$startTsMs scheme=${uri.scheme} authState=${diag.state} hasAuthSession=${YouTubeMusicClient.shared.hasAuthenticatedYouTubeSession()}"
+                    )
+                    YouTubeMusicClient.shared.resolveAudioStream(videoId, correlationId = corrId)
                 }.getOrElse { err ->
+                    val endTsMs = System.currentTimeMillis()
+                    val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
+                    val timedOut = err is java.net.SocketTimeoutException || err.cause is java.net.SocketTimeoutException
+                    val httpStatus = YouTubeMusicClient.extractHttpStatus(err)
+                    val origin = YouTubeMusicClient.classifyFailureOrigin(err, timedOut = timedOut)
+                    Log.w(
+                        "PULSE_YT_RESOLVER",
+                        "stage_event corr=$corrId stage=MEDIA_SERVICE_DATASOURCE videoId=$videoId startTsMs=$startTsMs endTsMs=$endTsMs durationMs=$elapsedMs outcome=${if (timedOut) "TIMEOUT" else "FAILURE"} errorClass=${err.javaClass.simpleName} rootCauseClass=${err.cause?.javaClass?.simpleName ?: "None"} httpStatus=$httpStatus usableStreamReturned=false isHls=false format=none cancelled=false timedOut=$timedOut failureOrigin=$origin msg=${YouTubeMusicClient.redactSensitiveUrls(err.message)}"
+                    )
                     throw IOException(err.message ?: "YouTube audio stream unavailable", err)
                 }
+                val endTsMs = System.currentTimeMillis()
+                val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
+                val parsedUrl = Uri.parse(resolved.url)
+                Log.i(
+                    "PULSE_YT_RESOLVER",
+                    "stage_event corr=$corrId stage=MEDIA_SERVICE_DATASOURCE videoId=$videoId startTsMs=$startTsMs endTsMs=$endTsMs durationMs=$elapsedMs outcome=SUCCESS errorClass=NONE rootCauseClass=NONE httpStatus=200 usableStreamReturned=true isHls=${resolved.isHls} format=${resolved.mimeType} cancelled=false timedOut=false failureOrigin=NONE host=${YouTubeMusicClient.redactHostOnly(resolved.url)} headerKeys=${resolved.requestHeaders.keys}"
+                )
+                YouTubeMusicClient.shared.registerResolvedStreamHeaders(resolved)
                 dataSpec.buildUpon()
-                    .setUri(Uri.parse(resolved.url))
+                    .setUri(parsedUrl)
                     .setHttpRequestHeaders(
                         dataSpec.httpRequestHeaders + resolved.requestHeaders
                     )
@@ -104,9 +159,29 @@ class PulseMediaService : MediaSessionService() {
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
 
-        val mediaSourceFactory = DefaultMediaSourceFactory(resolvingDataSourceFactory)
+        val delegateMediaSourceFactory = DefaultMediaSourceFactory(resolvingDataSourceFactory)
+        val mediaSourceFactory = PulseMediaSourceFactory(
+            delegateFactory = delegateMediaSourceFactory,
+            upstreamDataSourceFactory = upstreamFactory,
+            youtubeClient = YouTubeMusicClient.shared,
+            appContext = this
+        ).also { pulseMediaSourceFactory = it }
 
-        val exoPlayer = ExoPlayer.Builder(this)
+        val renderersFactory = object : DefaultRenderersFactory(this) {
+            override fun buildAudioSink(
+                context: Context,
+                enableFloatOutput: Boolean,
+                enableAudioTrackPlaybackParams: Boolean
+            ): AudioSink {
+                return DefaultAudioSink.Builder(context)
+                    .setEnableFloatOutput(enableFloatOutput)
+                    .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                    .setAudioProcessors(arrayOf(TeeAudioProcessor(AudioSpectrumBus.audioBufferSink)))
+                    .build()
+            }
+        }
+
+        val exoPlayer = ExoPlayer.Builder(this, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .setLoadControl(loadControl)
             .setAudioAttributes(audioAttributes, true)
@@ -116,6 +191,10 @@ class PulseMediaService : MediaSessionService() {
         exoPlayer.addListener(object : Player.Listener {
             override fun onAudioSessionIdChanged(audioSessionId: Int) {
                 attachAudioEffects(audioSessionId)
+            }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                AudioSpectrumBus.setPlaybackActive(isPlaying)
             }
         })
 
@@ -241,7 +320,11 @@ class PulseMediaService : MediaSessionService() {
         }
     }
 
+    @OptIn(UnstableApi::class)
     override fun onDestroy() {
+        AudioSpectrumBus.reset()
+        pulseMediaSourceFactory?.release()
+        pulseMediaSourceFactory = null
         releaseEffects()
         mediaSession?.run {
             player.release()
@@ -250,5 +333,189 @@ class PulseMediaService : MediaSessionService() {
         }
         player = null
         super.onDestroy()
+    }
+}
+
+/**
+ * Resolves queued `pulseyt://` [MediaItem]s into the matching Media3 [MediaSource]
+ * ([HlsMediaSource] for HLS manifests or [ProgressiveMediaSource] for direct streams)
+ * so ExoPlayer pre-buffering never misclassifies an `.m3u8` stream as progressive audio.
+ * Local, downloaded, and already-resolved items delegate untouched to [delegateFactory].
+ */
+@OptIn(UnstableApi::class)
+internal class PulseMediaSourceFactory(
+    private val delegateFactory: MediaSource.Factory,
+    upstreamDataSourceFactory: DataSource.Factory,
+    private val youtubeClient: YouTubeMusicClient,
+    private val appContext: android.content.Context? = null,
+    private val streamResolver: suspend (String) -> Result<ResolvedAudioStream> = { videoId ->
+        appContext?.let { youtubeClient.ensureAuthSessionHydrated(it) }
+        val corrId = youtubeClient.latestCorrelationIdFor(videoId)
+        youtubeClient.resolveAudioStream(videoId = videoId, correlationId = corrId)
+    },
+    private val peekCachedStream: (String) -> ResolvedAudioStream? = { videoId ->
+        youtubeClient.peekValidCachedStream(videoId)
+    }
+) : MediaSource.Factory {
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val hlsMediaSourceFactory = HlsMediaSource.Factory(upstreamDataSourceFactory)
+    private val progressiveMediaSourceFactory = ProgressiveMediaSource.Factory(upstreamDataSourceFactory)
+
+    override fun setDrmSessionManagerProvider(
+        drmSessionManagerProvider: DrmSessionManagerProvider
+    ): MediaSource.Factory {
+        delegateFactory.setDrmSessionManagerProvider(drmSessionManagerProvider)
+        hlsMediaSourceFactory.setDrmSessionManagerProvider(drmSessionManagerProvider)
+        progressiveMediaSourceFactory.setDrmSessionManagerProvider(drmSessionManagerProvider)
+        return this
+    }
+
+    override fun setLoadErrorHandlingPolicy(
+        loadErrorHandlingPolicy: LoadErrorHandlingPolicy
+    ): MediaSource.Factory {
+        delegateFactory.setLoadErrorHandlingPolicy(loadErrorHandlingPolicy)
+        hlsMediaSourceFactory.setLoadErrorHandlingPolicy(loadErrorHandlingPolicy)
+        progressiveMediaSourceFactory.setLoadErrorHandlingPolicy(loadErrorHandlingPolicy)
+        return this
+    }
+
+    override fun getSupportedTypes(): IntArray = delegateFactory.supportedTypes
+
+    override fun createMediaSource(mediaItem: MediaItem): MediaSource {
+        val uri = mediaItem.localConfiguration?.uri
+        if (uri?.scheme != Track.YOUTUBE_URI_SCHEME) {
+            return delegateFactory.createMediaSource(mediaItem)
+        }
+        val videoId = YouTubeMusicClient.extractVideoId(uri.toString())
+            ?: return delegateFactory.createMediaSource(mediaItem)
+
+        peekCachedStream(videoId)?.let { cached ->
+            youtubeClient.registerResolvedStreamHeaders(cached)
+            return buildResolvedChildMediaSource(mediaItem, cached)
+        }
+
+        return ResolvingYouTubeMediaSource(
+            originalMediaItem = mediaItem,
+            videoId = videoId,
+            scope = scope,
+            streamResolver = streamResolver,
+            childFactory = { resolved ->
+                youtubeClient.registerResolvedStreamHeaders(resolved)
+                buildResolvedChildMediaSource(mediaItem, resolved)
+            }
+        )
+    }
+
+    internal fun buildResolvedChildMediaSource(
+        originalMediaItem: MediaItem,
+        resolved: ResolvedAudioStream
+    ): MediaSource {
+        val isHlsStream = resolved.isHls ||
+            resolved.mimeType.equals(MimeTypes.APPLICATION_M3U8, ignoreCase = true) ||
+            resolved.url.contains(".m3u8", ignoreCase = true) ||
+            resolved.url.contains("hls_playlist", ignoreCase = true) ||
+            resolved.url.contains("hls_variant", ignoreCase = true)
+
+        val resolvedItem = originalMediaItem.buildUpon()
+            .setUri(Uri.parse(resolved.url))
+            .setMimeType(if (isHlsStream) MimeTypes.APPLICATION_M3U8 else null)
+            .build()
+
+        return if (isHlsStream) {
+            hlsMediaSourceFactory.createMediaSource(resolvedItem)
+        } else {
+            progressiveMediaSourceFactory.createMediaSource(resolvedItem)
+        }
+    }
+
+    fun release() {
+        scope.cancel()
+    }
+}
+
+@OptIn(UnstableApi::class)
+internal class ResolvingYouTubeMediaSource(
+    private val originalMediaItem: MediaItem,
+    private val videoId: String,
+    private val scope: CoroutineScope,
+    private val streamResolver: suspend (String) -> Result<ResolvedAudioStream>,
+    private val childFactory: (ResolvedAudioStream) -> MediaSource
+) : CompositeMediaSource<Void?>() {
+
+    private var resolveJob: Job? = null
+    private val released = AtomicBoolean(false)
+
+    @Volatile
+    private var childSource: MediaSource? = null
+
+    @Volatile
+    private var resolutionError: IOException? = null
+
+    internal fun preparedChildSourceForTest(): MediaSource? = childSource
+
+    override fun getMediaItem(): MediaItem = originalMediaItem
+
+    override fun prepareSourceInternal(mediaTransferListener: TransferListener?) {
+        super.prepareSourceInternal(mediaTransferListener)
+        released.set(false)
+        resolutionError = null
+        val playbackHandler = Handler(Looper.myLooper() ?: Looper.getMainLooper())
+        resolveJob = scope.launch {
+            val result = try {
+                streamResolver(videoId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                Result.failure(t)
+            }
+            playbackHandler.post {
+                if (released.get()) return@post
+                val stream = result.getOrNull()
+                if (stream != null) {
+                    val created = childFactory(stream)
+                    childSource = created
+                    prepareChildSource(null, created)
+                } else {
+                    val err = result.exceptionOrNull()
+                    resolutionError = (err as? IOException)
+                        ?: IOException(err?.message ?: "YouTube audio stream unavailable", err)
+                }
+            }
+        }
+    }
+
+    override fun maybeThrowSourceInfoRefreshError() {
+        resolutionError?.let { throw it }
+        super.maybeThrowSourceInfoRefreshError()
+    }
+
+    override fun onChildSourceInfoRefreshed(
+        childSourceId: Void?,
+        mediaSource: MediaSource,
+        newTimeline: Timeline
+    ) {
+        refreshSourceInfo(newTimeline)
+    }
+
+    override fun createPeriod(
+        id: MediaSource.MediaPeriodId,
+        allocator: Allocator,
+        startPositionUs: Long
+    ): MediaPeriod {
+        val child = childSource
+            ?: throw IllegalStateException("YouTube MediaSource period requested before child source prepared")
+        return child.createPeriod(id, allocator, startPositionUs)
+    }
+
+    override fun releasePeriod(mediaPeriod: MediaPeriod) {
+        childSource?.releasePeriod(mediaPeriod)
+    }
+
+    override fun releaseSourceInternal() {
+        released.set(true)
+        resolveJob?.cancel()
+        resolveJob = null
+        super.releaseSourceInternal()
     }
 }

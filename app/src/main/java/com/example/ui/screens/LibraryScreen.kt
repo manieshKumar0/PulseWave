@@ -74,7 +74,7 @@ import com.example.data.model.TrackSourceType
 import com.example.domain.SafMusicImporter
 import com.example.ui.components.GoogleSignInGateCard
 import com.example.ui.components.ObsidianGlassCard
-import com.example.ui.components.PulseWaveBrandLogo
+import com.example.ui.components.PulseScreenHeader
 import com.example.ui.components.TrackRowItem
 import com.example.ui.theme.UltravioletPulse
 import com.example.ui.viewmodel.UiState
@@ -97,6 +97,7 @@ fun LibraryScreen(
     offlineMode: Boolean,
     playlistsState: UiState<List<CollaborativePlaylistDoc>>,
     syncedLibraryState: UiState<List<SyncedTrackDoc>>,
+    searchError: String? = null,
     isScanningDeviceMusic: Boolean = false,
     isSignedIn: Boolean = true,
     isSigningIn: Boolean = false,
@@ -167,35 +168,16 @@ fun LibraryScreen(
         }
     }
 
-    val syncedCount = (syncedLibraryState as? UiState.Success)?.data?.size ?: 0
-
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 140.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                PulseWaveBrandLogo(size = 38.dp)
-                Column {
-                    Text(
-                        text = "Library & Vault",
-                        style = MaterialTheme.typography.headlineLarge
-                    )
-                    Text(
-                        text = when {
-                            offlineMode -> "Offline Mode · ${tracks.size} playable offline tracks"
-                            !isSignedIn -> "Guest Mode · ${tracks.count { it.isDownloaded }} offline ready · Local vault"
-                            else -> "$syncedCount cloud-synced · ${tracks.count { it.isDownloaded }} offline ready"
-                        },
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-            }
+            PulseScreenHeader(
+                title = "Library & Vault",
+                titleTestTag = "library_header_title"
+            )
         }
 
         // Search input
@@ -404,6 +386,51 @@ fun LibraryScreen(
                             }
                             Spacer(Modifier.width(6.dp))
                             Text(stringResource(R.string.device_songs_rescan))
+                        }
+                    }
+                }
+            }
+
+            if (searchQuery.isNotBlank() &&
+                !isSearching &&
+                !searchError.isNullOrBlank() &&
+                selectedFilter == LibraryFilter.ALL
+            ) {
+                item(key = "yt_search_error_banner") {
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("youtube_search_error_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text(
+                                text = searchError,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(
+                                onClick = { onSearchQuery(searchQuery) },
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("retry_youtube_search_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Refresh,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text("Retry")
+                            }
                         }
                     }
                 }

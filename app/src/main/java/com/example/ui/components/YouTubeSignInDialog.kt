@@ -1,7 +1,7 @@
 package com.example.ui.components
 
 import android.annotation.SuppressLint
-import android.graphics.Bitmap
+import android.util.Log
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
@@ -44,9 +44,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.example.data.remote.YouTubeMusicClient
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 private const val YOUTUBE_SIGNIN_URL =
     "https://accounts.google.com/ServiceLogin?service=youtube&uilel=3&passive=true&continue=https%3A%2F%2Fmusic.youtube.com%2F"
+private const val YT_DIAG_TAG = "PULSE_YT_RESOLVER"
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -56,41 +59,71 @@ fun YouTubeSignInDialog(
 ) {
     var loadProgress by remember { mutableIntStateOf(10) }
     var pageTitle by remember { mutableStateOf("Sign in to YouTube") }
+    var statusNotice by remember { mutableStateOf<String?>(null) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var capturedOnce by remember { mutableStateOf(false) }
 
-    fun tryExtractYouTubeAuth(view: WebView?, url: String?) {
+    fun tryExtractYouTubeAuth(view: WebView?, url: String?, isManualTrigger: Boolean) {
         if (capturedOnce) return
         val currentUrl = url.orEmpty()
-        val isYouTubeHost = currentUrl.contains("music.youtube.com", ignoreCase = true) ||
-            currentUrl.contains("www.youtube.com", ignoreCase = true) ||
-            currentUrl.contains("m.youtube.com", ignoreCase = true)
-        if (!isYouTubeHost) return
+        val host = currentUrl.toHttpUrlOrNull()?.host.orEmpty().lowercase()
+        val isYouTubeHost = host == "music.youtube.com" ||
+            host == "www.youtube.com" ||
+            host == "m.youtube.com" ||
+            host == "youtube.com"
 
         val cm = CookieManager.getInstance()
         val musicCookie = cm.getCookie("https://music.youtube.com").orEmpty()
         val rootCookie = cm.getCookie("https://www.youtube.com").orEmpty()
-        val mergedCookie = when {
-            musicCookie.contains("SAPISID=") || musicCookie.contains("__Secure-3PAPISID=") -> musicCookie
-            rootCookie.contains("SAPISID=") || rootCookie.contains("__Secure-3PAPISID=") -> rootCookie
-            else -> ""
+        val mergedCookie = YouTubeMusicClient.mergeCookieHeaders(rootCookie, musicCookie)
+        val components = YouTubeMusicClient.inspectCookieComponents(mergedCookie)
+
+        if (!isYouTubeHost && !isManualTrigger) return
+        if (!components.isAuthenticated) {
+            if (isManualTrigger || isYouTubeHost) {
+                Log.d(
+                    YT_DIAG_TAG,
+                    "auth_dialog_not_ready manual=$isManualTrigger host=$host cookieCount=${components.cookieCount} hasSapisid=${components.hasSapisid} hasSid=${components.hasSid} hasHsidOrSsid=${components.hasHsidOrSsid}"
+                )
+            }
+            if (isManualTrigger) {
+                statusNotice = "Sign-in is not finished yet. Complete Google sign-in on YouTube first."
+            }
+            return
         }
-        if (mergedCookie.isBlank()) return
 
-        capturedOnce = true
-        cm.flush()
-
-        val js = "(function(){try{var v=(window.ytcfg&&ytcfg.get)?ytcfg.get('VISITOR_DATA'):'';return v||'';}catch(e){return '';}})()"
+        val js = "(function(){try{var g=window.ytcfg&&ytcfg.get?ytcfg.get.bind(ytcfg):null;var v=g?(g('VISITOR_DATA')||''):'';var l=g?(g('LOGGED_IN')===true?'1':(g('LOGGED_IN')===false?'0':'')):'';return JSON.stringify({v:v,l:l});}catch(e){return '';}})()"
         if (view != null) {
-            view.evaluateJavascript(js) { rawVisitor ->
-                val visitor = rawVisitor
+            view.evaluateJavascript(js) { rawJson ->
+                if (capturedOnce) return@evaluateJavascript
+                val parsedObj = rawJson
                     ?.trim()
                     ?.removeSurrounding("\"")
+                    ?.replace("\\\"", "\"")
+                    ?.let { runCatching { org.json.JSONObject(it) }.getOrNull() }
+                val loggedInFlag = parsedObj?.optString("l").orEmpty()
+                if (loggedInFlag == "0" && !isManualTrigger) {
+                    Log.w(YT_DIAG_TAG, "auth_dialog_ytcfg_not_logged_in host=$host cookieCount=${components.cookieCount}")
+                    return@evaluateJavascript
+                }
+                val visitor = parsedObj?.optString("v")
                     ?.takeUnless { it == "null" || it == "undefined" }
                     .orEmpty()
+                capturedOnce = true
+                cm.flush()
+                Log.i(
+                    YT_DIAG_TAG,
+                    "auth_dialog_captured manual=$isManualTrigger host=$host cookieCount=${components.cookieCount} hasSapisid=${components.hasSapisid} hasSid=${components.hasSid} hasHsidOrSsid=${components.hasHsidOrSsid} hasVisitorData=${visitor.isNotBlank()}"
+                )
                 onSessionCaptured(mergedCookie, visitor, "YouTube Music Connected")
             }
         } else {
+            capturedOnce = true
+            cm.flush()
+            Log.i(
+                YT_DIAG_TAG,
+                "auth_dialog_captured_no_view manual=$isManualTrigger cookieCount=${components.cookieCount} hasSapisid=${components.hasSapisid} hasSid=${components.hasSid} hasVisitorData=false"
+            )
             onSessionCaptured(mergedCookie, "", "YouTube Music Connected")
         }
     }
@@ -153,11 +186,22 @@ fun YouTubeSignInDialog(
                     }
 
                     TextButton(
-                        onClick = { tryExtractYouTubeAuth(webViewRef, webViewRef?.url) },
-                        modifier = Modifier.height(48.dp)
+                        onClick = { tryExtractYouTubeAuth(webViewRef, webViewRef?.url, isManualTrigger = true) },
+                        modifier = Modifier
+                            .height(48.dp)
+                            .testTag("youtube_signin_done_button")
                     ) {
                         Text("Done")
                     }
+                }
+
+                statusNotice?.let { notice ->
+                    Text(
+                        text = notice,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                    )
                 }
 
                 if (loadProgress in 1..99) {
@@ -198,16 +242,14 @@ fun YouTubeSignInDialog(
                                 }
 
                                 webViewClient = object : WebViewClient() {
-                                    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                                        tryExtractYouTubeAuth(view, url)
-                                    }
-
                                     override fun onPageFinished(view: WebView?, url: String?) {
-                                        tryExtractYouTubeAuth(view, url)
+                                        statusNotice = null
+                                        tryExtractYouTubeAuth(view, url, isManualTrigger = false)
                                     }
                                 }
 
                                 webViewRef = this
+                                Log.i(YT_DIAG_TAG, "auth_dialog_opened")
                                 loadUrl(YOUTUBE_SIGNIN_URL)
                             }
                         }

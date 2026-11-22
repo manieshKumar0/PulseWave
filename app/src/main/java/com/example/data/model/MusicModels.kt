@@ -5,7 +5,6 @@ import androidx.compose.runtime.Immutable
 enum class TrackSourceType(val label: String) {
     YOUTUBE("YouTube Music"),
     STREAM("Stream"),
-    CURATED("Curated"),
     LOCAL_SAF("Device"),
     CLOUD_SAF("Cloud Drive")
 }

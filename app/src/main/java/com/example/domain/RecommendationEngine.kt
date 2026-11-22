@@ -363,7 +363,7 @@ class RecommendationEngine {
         val ytPicks = picks.filter { it.track.sourceType == TrackSourceType.YOUTUBE }
         val nonYtPicks = picks.filter { it.track.sourceType != TrackSourceType.YOUTUBE }
         val hero = if (ytPicks.isNotEmpty() && nonYtPicks.isNotEmpty()) {
-            // Blend YouTube Music and local/Audius picks in Top Personalized Picks
+            // Blend YouTube Music and local device picks in Top Personalized Picks
             (ytPicks.take(3) + nonYtPicks.take(3) + picks).distinctBy { it.track.id }.take(6)
         } else {
             picks.take(6)
