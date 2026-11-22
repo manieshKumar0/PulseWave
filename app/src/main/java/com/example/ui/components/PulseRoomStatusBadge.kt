@@ -125,6 +125,7 @@ fun PulseRoomStatusBadge(
     Surface(
         shape = RoundedCornerShape(18.dp),
         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
+        contentColor = MaterialTheme.colorScheme.onSurface,
         border = BorderStroke(
             width = 1.2.dp,
             brush = Brush.horizontalGradient(
@@ -171,6 +172,7 @@ fun PulseRoomStatusBadge(
                 Surface(
                     shape = CircleShape,
                     color = badgeAccent.copy(alpha = 0.2f),
+                    contentColor = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.size(28.dp)
                 ) {
                     Box(contentAlignment = Alignment.Center) {

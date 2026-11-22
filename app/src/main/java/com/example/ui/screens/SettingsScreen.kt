@@ -569,6 +569,11 @@ fun SettingsScreen(
                                 MintElectric.copy(alpha = 0.2f)
                             } else {
                                 MaterialTheme.colorScheme.surfaceVariant
+                            },
+                            contentColor = if (isTimerActive) {
+                                MintElectric
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
                             }
                         ) {
                             Text(

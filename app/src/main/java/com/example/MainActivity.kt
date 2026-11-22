@@ -5,10 +5,13 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -21,6 +24,8 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Groups
@@ -47,6 +52,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
@@ -57,7 +65,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.navigation.NavDestination.Companion.hasRoute
-import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -72,6 +79,7 @@ import com.example.data.local.LocalLibraryRepository
 import com.example.data.local.PreferencesRepository
 import com.example.data.local.PulseDatabase
 import com.example.data.model.SonicDnaProfile
+import com.example.data.model.SoundscapePreset
 import com.example.data.model.Track
 import com.example.data.model.UserProfile
 import com.example.data.remote.LrclibClient
@@ -80,6 +88,7 @@ import com.example.data.remote.YouTubeMusicClient
 import com.example.domain.RecommendationEngine
 import com.example.domain.SafMusicImporter
 import com.example.media.PlaybackController
+import com.example.media.PlaybackUiState
 import com.example.ui.components.GoogleSignInRequiredDialog
 import com.example.ui.components.MiniPlayerBar
 import com.example.ui.components.PulseWaveBrandLogo
@@ -96,21 +105,38 @@ import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.SocialGuestGateScreen
 import com.example.ui.screens.SocialHubScreen
 import com.example.ui.theme.PulseWaveTheme
-import com.example.ui.theme.UltravioletPulse
 import com.example.ui.viewmodel.PulseViewModel
 import com.example.ui.viewmodel.SocialViewModel
 import com.example.ui.viewmodel.UiState
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
+import kotlin.math.abs
 
-@Serializable data object ForYouRoute
-@Serializable data object LibraryRoute
-@Serializable data object SocialRoute
-@Serializable data object SettingsRoute
+@Serializable data object HomeTabsRoute
 @Serializable data class PulseRoomRoute(val roomId: String)
+
+private data class MainTabSpec(
+    val label: String,
+    val icon: ImageVector,
+    val navTestTag: String,
+    val railTestTag: String
+)
+
+private data class SettingsPlaybackSnapshot(
+    val sleepTimerRemainingMs: Long?,
+    val sleepTimerTotalMs: Long?,
+    val eqEnabled: Boolean,
+    val activeSoundscape: SoundscapePreset,
+    val bandLevels: List<Int>,
+    val bassBoost: Int,
+    val reverbPreset: Int
+)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -221,7 +247,40 @@ private fun AuthenticatedPulseApp(
     }
 
     val settings by pulseViewModel.settings.collectAsStateWithLifecycle()
-    val playbackState by pulseViewModel.playbackState.collectAsStateWithLifecycle()
+    val activeTrack by remember(pulseViewModel) {
+        pulseViewModel.playbackState.map { it.currentTrack }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = null)
+    val isPlaying by remember(pulseViewModel) {
+        pulseViewModel.playbackState.map { it.isPlaying }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = false)
+    val activeSoundscape by remember(pulseViewModel) {
+        pulseViewModel.playbackState.map { it.activeSoundscape }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = pulseViewModel.playbackState.value.activeSoundscape)
+    val settingsPlayback by remember(pulseViewModel) {
+        pulseViewModel.playbackState.map {
+            SettingsPlaybackSnapshot(
+                sleepTimerRemainingMs = it.sleepTimerRemainingMs,
+                sleepTimerTotalMs = it.sleepTimerTotalMs,
+                eqEnabled = it.eqEnabled,
+                activeSoundscape = it.activeSoundscape,
+                bandLevels = it.bandLevels,
+                bassBoost = it.bassBoost,
+                reverbPreset = it.reverbPreset
+            )
+        }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(
+        initialValue = with(pulseViewModel.playbackState.value) {
+            SettingsPlaybackSnapshot(
+                sleepTimerRemainingMs = sleepTimerRemainingMs,
+                sleepTimerTotalMs = sleepTimerTotalMs,
+                eqEnabled = eqEnabled,
+                activeSoundscape = activeSoundscape,
+                bandLevels = bandLevels,
+                bassBoost = bassBoost,
+                reverbPreset = reverbPreset
+            )
+        }
+    )
     val discoveryState by pulseViewModel.discoveryState.collectAsStateWithLifecycle()
     val liveSonicDna by pulseViewModel.sonicDnaProfile.collectAsStateWithLifecycle()
     val libraryTracks by pulseViewModel.allLibraryTracks.collectAsStateWithLifecycle()
@@ -321,8 +380,8 @@ private fun AuthenticatedPulseApp(
         }
     }
 
-    LaunchedEffect(playbackState.currentTrack?.id, liveSonicDna.totalPlays, isSignedIn) {
-        val t = playbackState.currentTrack ?: return@LaunchedEffect
+    LaunchedEffect(activeTrack?.id, liveSonicDna.totalPlays, isSignedIn) {
+        val t = activeTrack ?: return@LaunchedEffect
         if (isSignedIn && socialViewModel != null) {
             socialViewModel.observeLyricNotesForTrack(t.trackKey)
             socialViewModel.syncSonicDna(sonicDna, t)
@@ -373,17 +432,42 @@ private fun AuthenticatedPulseApp(
         ) {
             val isExpandedScreen = maxWidth >= 840.dp
 
-            val navItems = listOf(
-                Triple("For You", ForYouRoute, Icons.Rounded.AutoAwesome),
-                Triple("Library", LibraryRoute, Icons.Rounded.LibraryMusic),
-                Triple("Social", SocialRoute, Icons.Rounded.Groups),
-                Triple("Settings", SettingsRoute, Icons.Rounded.Settings)
-            )
-
+            val tabItems = remember {
+                listOf(
+                    MainTabSpec("For You", Icons.Rounded.AutoAwesome, "nav_for_you", "rail_for_you"),
+                    MainTabSpec("Library", Icons.Rounded.LibraryMusic, "nav_library", "rail_library"),
+                    MainTabSpec("Social", Icons.Rounded.Groups, "nav_social", "rail_social"),
+                    MainTabSpec("Settings", Icons.Rounded.Settings, "nav_settings", "rail_settings")
+                )
+            }
+            val pagerState = rememberPagerState(initialPage = 0, pageCount = { tabItems.size })
             val isOnRoomRoute = currentDestination?.hasRoute(PulseRoomRoute::class) == true
 
+            fun selectTab(index: Int) {
+                if (isOnRoomRoute) {
+                    navController.popBackStack<HomeTabsRoute>(inclusive = false)
+                }
+                if (pagerState.currentPage == index) return
+                scope.launch {
+                    val current = pagerState.currentPage
+                    if (abs(index - current) > 1) {
+                        val neighbor = if (index > current) index - 1 else index + 1
+                        pagerState.scrollToPage(neighbor)
+                    }
+                    pagerState.animateScrollToPage(
+                        page = index,
+                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing)
+                    )
+                }
+            }
+
+            BackHandler(enabled = !isOnRoomRoute && !showNowPlaying && pagerState.currentPage != 0) {
+                selectTab(0)
+            }
+
             Scaffold(
-                containerColor = androidx.compose.ui.graphics.Color.Transparent,
+                containerColor = Color.Transparent,
+                contentColor = MaterialTheme.colorScheme.onBackground,
                 contentWindowInsets = WindowInsets(0, 0, 0, 0),
                 snackbarHost = { SnackbarHost(snackbarHostState) },
                 bottomBar = {
@@ -392,20 +476,14 @@ private fun AuthenticatedPulseApp(
                             windowInsets = WindowInsets.navigationBars,
                             containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f)
                         ) {
-                            navItems.forEach { (label, route, icon) ->
-                                val selected = currentDestination?.hierarchy?.any { it.hasRoute(route::class) } == true
+                            tabItems.forEachIndexed { index, tab ->
+                                val selected = !isOnRoomRoute && pagerState.targetPage == index
                                 NavigationBarItem(
                                     selected = selected,
-                                    onClick = {
-                                        navController.navigate(route) {
-                                            popUpTo<ForYouRoute> { saveState = true }
-                                            launchSingleTop = true
-                                            restoreState = true
-                                        }
-                                    },
-                                    icon = { Icon(icon, contentDescription = label) },
-                                    label = { Text(label) },
-                                    modifier = Modifier.testTag("nav_${label.lowercase().replace(" ", "_")}")
+                                    onClick = { selectTab(index) },
+                                    icon = { Icon(tab.icon, contentDescription = tab.label) },
+                                    label = { Text(tab.label) },
+                                    modifier = Modifier.testTag(tab.navTestTag)
                                 )
                             }
                         }
@@ -427,20 +505,14 @@ private fun AuthenticatedPulseApp(
                                 )
                             }
                         ) {
-                            navItems.forEach { (label, route, icon) ->
-                                val selected = currentDestination?.hierarchy?.any { it.hasRoute(route::class) } == true
+                            tabItems.forEachIndexed { index, tab ->
+                                val selected = !isOnRoomRoute && pagerState.targetPage == index
                                 NavigationRailItem(
                                     selected = selected,
-                                    onClick = {
-                                        navController.navigate(route) {
-                                            popUpTo<ForYouRoute> { saveState = true }
-                                            launchSingleTop = true
-                                            restoreState = true
-                                        }
-                                    },
-                                    icon = { Icon(icon, contentDescription = label) },
-                                    label = { Text(label) },
-                                    modifier = Modifier.testTag("rail_${label.lowercase().replace(" ", "_")}")
+                                    onClick = { selectTab(index) },
+                                    icon = { Icon(tab.icon, contentDescription = tab.label) },
+                                    label = { Text(tab.label) },
+                                    modifier = Modifier.testTag(tab.railTestTag)
                                 )
                             }
                         }
@@ -455,205 +527,215 @@ private fun AuthenticatedPulseApp(
                     ) {
                         NavHost(
                             navController = navController,
-                            startDestination = ForYouRoute,
+                            startDestination = HomeTabsRoute,
                             modifier = Modifier.widthIn(max = 960.dp).fillMaxSize()
                         ) {
-                            composable<ForYouRoute> {
-                                ForYouScreen(
-                                    discoveryState = discoveryState,
-                                    activeTrackId = playbackState.currentTrack?.id,
-                                    isPlaying = playbackState.isPlaying,
-                                    activeMoodMix = activeMoodMix,
-                                    downloadProgress = downloadProgress,
-                                    offlineMode = settings.offlineMode,
-                                    onRefreshWithMood = { mood -> pulseViewModel.refreshCatalogAndRecommendations(mood) },
-                                    onPlayMoodMix = { mix ->
-                                        pulseViewModel.playMoodMix(
-                                            moodTitle = mix.name,
-                                            searchQuery = mix.searchQuery,
-                                            toggleIfSame = true
-                                        )
-                                    },
-                                    onAskAiDj = { prompt ->
-                                        pulseViewModel.playMoodMix(
-                                            moodTitle = prompt,
-                                            searchQuery = "$prompt music mix",
-                                            toggleIfSame = false
-                                        )
-                                    },
-                                    onPlayTrack = { track, queue ->
-                                        pulseViewModel.playTrack(track, queue)
-                                        socialViewModel?.syncTrackBookmark(track, track.isLiked)
-                                    },
-                                    onToggleLike = { track ->
-                                        pulseViewModel.toggleLikeTrack(track)
-                                        socialViewModel?.syncTrackBookmark(track, !track.isLiked)
-                                    },
-                                    onDownloadClick = { track ->
-                                        if (track.isDownloaded) pulseViewModel.removeOfflineTrack(track)
-                                        else pulseViewModel.downloadTrackOffline(track)
-                                    },
-                                    onShareClick = { track ->
-                                        if (isSignedIn) shareTargetTrack = track
-                                        else pendingSignInFeature = "sharing tracks"
-                                    },
-                                    onRecordDwell = { track, dwell -> pulseViewModel.recordFeedCardDwell(track, dwell) }
-                                )
-                            }
-
-                            composable<LibraryRoute> {
-                                LibraryScreen(
-                                    tracks = libraryTracks,
-                                    searchResults = searchResults,
-                                    isSearching = isSearching,
-                                    searchError = searchError,
-                                    activeTrack = playbackState.currentTrack,
-                                    downloadProgress = downloadProgress,
-                                    offlineMode = settings.offlineMode,
-                                    playlistsState = playlistsState,
-                                    syncedLibraryState = syncedLibraryState,
-                                    isScanningDeviceMusic = isScanningDeviceMusic,
-                                    isSignedIn = isSignedIn,
-                                    isSigningIn = isSigningIn,
-                                    onSignInWithGoogle = { triggerGoogleSignIn() },
-                                    onScanDeviceAudio = { silent -> pulseViewModel.scanDeviceAudioTracks(silent) },
-                                    onSearchQuery = { pulseViewModel.searchTracks(it) },
-                                    onPlayTrack = { track, queue ->
-                                        pulseViewModel.playTrack(track, queue)
-                                        socialViewModel?.syncTrackBookmark(track, track.isLiked)
-                                    },
-                                    onToggleLike = { track ->
-                                        pulseViewModel.toggleLikeTrack(track)
-                                        socialViewModel?.syncTrackBookmark(track, !track.isLiked)
-                                    },
-                                    onDownloadClick = { track ->
-                                        if (track.isDownloaded) pulseViewModel.removeOfflineTrack(track)
-                                        else pulseViewModel.downloadTrackOffline(track)
-                                    },
-                                    onShareClick = { track ->
-                                        if (isSignedIn) shareTargetTrack = track
-                                        else pendingSignInFeature = "sharing tracks"
-                                    },
-                                    onCreatePlaylist = { title, desc, seeds ->
-                                        socialViewModel?.createPlaylist(title, desc, listOf(uid), seeds)
-                                    },
-                                    onAddActiveTrackToPlaylist = { pl, t -> socialViewModel?.addTrackToPlaylist(pl, t) },
-                                    onUpvotePlaylistTrack = { pl, tid -> socialViewModel?.upvotePlaylistTrack(pl, tid) }
-                                )
-                            }
-
-                            composable<SettingsRoute> {
-                                val syncedCount = (syncedLibraryState as? UiState.Success)?.data?.size ?: 0
-                                SettingsScreen(
-                                    currentUserProfile = currentUserProfile,
-                                    settings = settings,
-                                    tracks = libraryTracks,
-                                    syncedCount = syncedCount,
-                                    sleepTimerRemainingMs = playbackState.sleepTimerRemainingMs,
-                                    sleepTimerTotalMs = playbackState.sleepTimerTotalMs,
-                                    eqEnabled = playbackState.eqEnabled,
-                                    activeEqPreset = playbackState.activeSoundscape,
-                                    eqBandLevels = playbackState.bandLevels,
-                                    eqBassBoost = playbackState.bassBoost,
-                                    eqReverbPreset = playbackState.reverbPreset,
-                                    offlineCacheSummary = offlineCacheSummary,
-                                    isSyncingLocalLyrics = isSyncingLocalLyrics,
-                                    isSignedIn = isSignedIn,
-                                    isSigningIn = isSigningIn,
-                                    onSignInWithGoogle = { triggerGoogleSignIn() },
-                                    onRequireSignIn = { feature -> pendingSignInFeature = feature },
-                                    onToggleOfflineMode = { pulseViewModel.setOfflineMode(it) },
-                                    onToggleHighResStreaming = { pulseViewModel.setHighResStreaming(it) },
-                                    onCrossfadeSecondsChange = { pulseViewModel.setCrossfadeSeconds(it) },
-                                    onToggleEqEnabled = { pulseViewModel.setEqualizerEnabled(it) },
-                                    onSelectEqPreset = { pulseViewModel.applySoundscapePreset(it) },
-                                    onUpdateEqBand = { idx, mb -> pulseViewModel.updateEqualizerBand(idx, mb) },
-                                    onUpdateEqBassBoost = { pulseViewModel.updateBassBoost(it) },
-                                    onUpdateEqReverb = { pulseViewModel.updateReverbPreset(it) },
-                                    onResetEqualizer = { pulseViewModel.resetEqualizer() },
-                                    onStartSleepTimer = { pulseViewModel.startSleepTimer(it) },
-                                    onExtendSleepTimer = { pulseViewModel.extendSleepTimer(it) },
-                                    onCancelSleepTimer = { pulseViewModel.cancelSleepTimer() },
-                                    onSelectThemeMode = { pulseViewModel.setThemeMode(it) },
-                                    onToggleDynamicGlow = { pulseViewModel.setDynamicAlbumGlow(it) },
-                                    onImportSafAudio = { uris, isCloud -> pulseViewModel.importSafAudio(uris, isCloud) },
-                                    onSyncLocalLyrics = { pulseViewModel.syncLocalTracksMetadataAndLyrics() },
-                                    onClearMetadataCache = { pulseViewModel.clearMetadataCache() },
-                                    onConnectYouTube = { showYouTubeSignInDialog = true },
-                                    onDisconnectYouTube = { pulseViewModel.disconnectYouTubeSession() },
-                                    onSignOut = {
-                                        signOutUser(credentialManager, scope, onSignOutComplete = onSignOutComplete)
-                                    }
-                                )
-                            }
-
-                            composable<SocialRoute> {
-                                if (!isSignedIn || socialViewModel == null) {
-                                    SocialGuestGateScreen(
-                                        isSigningIn = isSigningIn,
-                                        onSignInWithGoogle = { triggerGoogleSignIn() }
-                                    )
-                                } else {
-                                    SocialHubScreen(
-                                        currentUserId = uid,
-                                        currentUserProfile = currentUserProfile,
-                                        mySonicDna = sonicDna,
-                                        activeTrack = playbackState.currentTrack,
-                                        activeSoundscapeName = playbackState.activeSoundscape.name,
-                                        libraryTracks = libraryTracks,
-                                        discoverableUsersState = discoverableUsersState,
-                                        friendRequestsState = friendRequestsState,
-                                        feedPostsState = feedPostsState,
-                                        activePostComments = activePostComments,
-                                        conversationsState = conversationsState,
-                                        activeMessages = activeMessages,
-                                        activeRoomsState = activeRoomsState,
-                                        computeTasteCompatibility = { socialViewModel.computeTasteCompatibility(it) },
-                                        defaultRoomName = defaultRoomName,
-                                        onPlayTrack = { track -> pulseViewModel.playTrack(track, listOf(track)) },
-                                        onPublishPost = { track, cap, quote, preset ->
-                                            socialViewModel.publishPost(track, cap, "TRACK", quote, preset)
-                                        },
-                                        onTogglePostLike = { socialViewModel.togglePostLike(it) },
-                                        onOpenPostComments = { socialViewModel.openPostComments(it) },
-                                        onAddPostComment = { post, text -> socialViewModel.addPostComment(post, text) },
-                                        onSendFriendRequest = { socialViewModel.sendFriendRequest(it) },
-                                        onAcceptFriendRequest = { socialViewModel.acceptFriendRequest(it) },
-                                        onCreateTasteBlend = { friend ->
-                                            socialViewModel.createTasteBlendPlaylist(friend, libraryTracks)
-                                        },
-                                        onOpenConversation = { socialViewModel.openConversation(it) },
-                                        onSendDm = { recipient, text, track, type, presetName ->
-                                            socialViewModel.sendDm(
-                                                recipient = recipient,
-                                                text = text,
-                                                attachedTrack = track,
-                                                attachmentType = type,
-                                                presetName = presetName
-                                            )
-                                        },
-                                        onCreatePulseRoom = { roomName, moodTag, seedTrack ->
-                                            pulseViewModel.playTrack(seedTrack)
-                                            socialViewModel.createAndJoinPulseRoom(
-                                                roomName = roomName,
-                                                moodTag = moodTag,
-                                                track = seedTrack,
-                                                soundscapePreset = playbackState.activeSoundscape.name
-                                            ) { createdRoomId ->
-                                                navController.navigate(PulseRoomRoute(createdRoomId))
+                            composable<HomeTabsRoute> {
+                                HorizontalPager(
+                                    state = pagerState,
+                                    beyondViewportPageCount = 3,
+                                    userScrollEnabled = false,
+                                    key = { it },
+                                    modifier = Modifier.fillMaxSize()
+                                ) { page ->
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .graphicsLayer {
+                                                val pageOffset = ((pagerState.currentPage - page) + pagerState.currentPageOffsetFraction)
+                                                    .coerceIn(-1f, 1f)
+                                                alpha = 1f - (abs(pageOffset) * 0.22f)
                                             }
-                                        },
-                                        onJoinPulseRoom = { room ->
-                                            socialViewModel.joinAndObservePulseRoom(room) {
-                                                navController.navigate(PulseRoomRoute(room.id))
+                                    ) {
+                                        when (page) {
+                                            0 -> ForYouScreen(
+                                                discoveryState = discoveryState,
+                                                activeTrackId = activeTrack?.id,
+                                                isPlaying = isPlaying,
+                                                activeMoodMix = activeMoodMix,
+                                                downloadProgress = downloadProgress,
+                                                offlineMode = settings.offlineMode,
+                                                onRefreshWithMood = { mood -> pulseViewModel.refreshCatalogAndRecommendations(mood) },
+                                                onPlayMoodMix = { mix ->
+                                                    pulseViewModel.playMoodMix(
+                                                        moodTitle = mix.name,
+                                                        searchQuery = mix.searchQuery,
+                                                        toggleIfSame = true
+                                                    )
+                                                },
+                                                onPlayTrack = { track, queue ->
+                                                    pulseViewModel.playTrack(track, queue)
+                                                    socialViewModel?.syncTrackBookmark(track, track.isLiked)
+                                                },
+                                                onToggleLike = { track ->
+                                                    pulseViewModel.toggleLikeTrack(track)
+                                                    socialViewModel?.syncTrackBookmark(track, !track.isLiked)
+                                                },
+                                                onDownloadClick = { track ->
+                                                    if (track.isDownloaded) pulseViewModel.removeOfflineTrack(track)
+                                                    else pulseViewModel.downloadTrackOffline(track)
+                                                },
+                                                onShareClick = { track ->
+                                                    if (isSignedIn) shareTargetTrack = track
+                                                    else pendingSignInFeature = "sharing tracks"
+                                                },
+                                                onRecordDwell = { track, dwell -> pulseViewModel.recordFeedCardDwell(track, dwell) }
+                                            )
+
+                                            1 -> LibraryScreen(
+                                                tracks = libraryTracks,
+                                                searchResults = searchResults,
+                                                isSearching = isSearching,
+                                                searchError = searchError,
+                                                activeTrack = activeTrack,
+                                                downloadProgress = downloadProgress,
+                                                offlineMode = settings.offlineMode,
+                                                playlistsState = playlistsState,
+                                                syncedLibraryState = syncedLibraryState,
+                                                isScanningDeviceMusic = isScanningDeviceMusic,
+                                                isSignedIn = isSignedIn,
+                                                isSigningIn = isSigningIn,
+                                                onSignInWithGoogle = { triggerGoogleSignIn() },
+                                                onScanDeviceAudio = { silent -> pulseViewModel.scanDeviceAudioTracks(silent) },
+                                                onSearchQuery = { pulseViewModel.searchTracks(it) },
+                                                onPlayTrack = { track, queue ->
+                                                    pulseViewModel.playTrack(track, queue)
+                                                    socialViewModel?.syncTrackBookmark(track, track.isLiked)
+                                                },
+                                                onToggleLike = { track ->
+                                                    pulseViewModel.toggleLikeTrack(track)
+                                                    socialViewModel?.syncTrackBookmark(track, !track.isLiked)
+                                                },
+                                                onDownloadClick = { track ->
+                                                    if (track.isDownloaded) pulseViewModel.removeOfflineTrack(track)
+                                                    else pulseViewModel.downloadTrackOffline(track)
+                                                },
+                                                onShareClick = { track ->
+                                                    if (isSignedIn) shareTargetTrack = track
+                                                    else pendingSignInFeature = "sharing tracks"
+                                                },
+                                                onCreatePlaylist = { title, desc, seeds ->
+                                                    socialViewModel?.createPlaylist(title, desc, listOf(uid), seeds)
+                                                },
+                                                onAddActiveTrackToPlaylist = { pl, t -> socialViewModel?.addTrackToPlaylist(pl, t) },
+                                                onUpvotePlaylistTrack = { pl, tid -> socialViewModel?.upvotePlaylistTrack(pl, tid) }
+                                            )
+
+                                            2 -> if (!isSignedIn || socialViewModel == null) {
+                                                SocialGuestGateScreen(
+                                                    isSigningIn = isSigningIn,
+                                                    onSignInWithGoogle = { triggerGoogleSignIn() }
+                                                )
+                                            } else {
+                                                SocialHubScreen(
+                                                    currentUserId = uid,
+                                                    currentUserProfile = currentUserProfile,
+                                                    mySonicDna = sonicDna,
+                                                    activeTrack = activeTrack,
+                                                    activeSoundscapeName = activeSoundscape.name,
+                                                    libraryTracks = libraryTracks,
+                                                    discoverableUsersState = discoverableUsersState,
+                                                    friendRequestsState = friendRequestsState,
+                                                    feedPostsState = feedPostsState,
+                                                    activePostComments = activePostComments,
+                                                    conversationsState = conversationsState,
+                                                    activeMessages = activeMessages,
+                                                    activeRoomsState = activeRoomsState,
+                                                    computeTasteCompatibility = { socialViewModel.computeTasteCompatibility(it) },
+                                                    defaultRoomName = defaultRoomName,
+                                                    onPlayTrack = { track -> pulseViewModel.playTrack(track, listOf(track)) },
+                                                    onPublishPost = { track, cap, quote, preset ->
+                                                        socialViewModel.publishPost(track, cap, "TRACK", quote, preset)
+                                                    },
+                                                    onTogglePostLike = { socialViewModel.togglePostLike(it) },
+                                                    onOpenPostComments = { socialViewModel.openPostComments(it) },
+                                                    onAddPostComment = { post, text -> socialViewModel.addPostComment(post, text) },
+                                                    onSendFriendRequest = { socialViewModel.sendFriendRequest(it) },
+                                                    onAcceptFriendRequest = { socialViewModel.acceptFriendRequest(it) },
+                                                    onCreateTasteBlend = { friend ->
+                                                        socialViewModel.createTasteBlendPlaylist(friend, libraryTracks)
+                                                    },
+                                                    onOpenConversation = { socialViewModel.openConversation(it) },
+                                                    onSendDm = { recipient, text, track, type, presetName ->
+                                                        socialViewModel.sendDm(
+                                                            recipient = recipient,
+                                                            text = text,
+                                                            attachedTrack = track,
+                                                            attachmentType = type,
+                                                            presetName = presetName
+                                                        )
+                                                    },
+                                                    onCreatePulseRoom = { roomName, moodTag, seedTrack ->
+                                                        pulseViewModel.playTrack(seedTrack)
+                                                        socialViewModel.createAndJoinPulseRoom(
+                                                            roomName = roomName,
+                                                            moodTag = moodTag,
+                                                            track = seedTrack,
+                                                            soundscapePreset = activeSoundscape.name
+                                                        ) { createdRoomId ->
+                                                            navController.navigate(PulseRoomRoute(createdRoomId))
+                                                        }
+                                                    },
+                                                    onJoinPulseRoom = { room ->
+                                                        socialViewModel.joinAndObservePulseRoom(room) {
+                                                            navController.navigate(PulseRoomRoute(room.id))
+                                                        }
+                                                    }
+                                                )
+                                            }
+
+                                            else -> {
+                                                val syncedCount = (syncedLibraryState as? UiState.Success)?.data?.size ?: 0
+                                                SettingsScreen(
+                                                    currentUserProfile = currentUserProfile,
+                                                    settings = settings,
+                                                    tracks = libraryTracks,
+                                                    syncedCount = syncedCount,
+                                                    sleepTimerRemainingMs = settingsPlayback.sleepTimerRemainingMs,
+                                                    sleepTimerTotalMs = settingsPlayback.sleepTimerTotalMs,
+                                                    eqEnabled = settingsPlayback.eqEnabled,
+                                                    activeEqPreset = settingsPlayback.activeSoundscape,
+                                                    eqBandLevels = settingsPlayback.bandLevels,
+                                                    eqBassBoost = settingsPlayback.bassBoost,
+                                                    eqReverbPreset = settingsPlayback.reverbPreset,
+                                                    offlineCacheSummary = offlineCacheSummary,
+                                                    isSyncingLocalLyrics = isSyncingLocalLyrics,
+                                                    isSignedIn = isSignedIn,
+                                                    isSigningIn = isSigningIn,
+                                                    onSignInWithGoogle = { triggerGoogleSignIn() },
+                                                    onRequireSignIn = { feature -> pendingSignInFeature = feature },
+                                                    onToggleOfflineMode = { pulseViewModel.setOfflineMode(it) },
+                                                    onToggleHighResStreaming = { pulseViewModel.setHighResStreaming(it) },
+                                                    onCrossfadeSecondsChange = { pulseViewModel.setCrossfadeSeconds(it) },
+                                                    onToggleEqEnabled = { pulseViewModel.setEqualizerEnabled(it) },
+                                                    onSelectEqPreset = { pulseViewModel.applySoundscapePreset(it) },
+                                                    onUpdateEqBand = { idx, mb -> pulseViewModel.updateEqualizerBand(idx, mb) },
+                                                    onUpdateEqBassBoost = { pulseViewModel.updateBassBoost(it) },
+                                                    onUpdateEqReverb = { pulseViewModel.updateReverbPreset(it) },
+                                                    onResetEqualizer = { pulseViewModel.resetEqualizer() },
+                                                    onStartSleepTimer = { pulseViewModel.startSleepTimer(it) },
+                                                    onExtendSleepTimer = { pulseViewModel.extendSleepTimer(it) },
+                                                    onCancelSleepTimer = { pulseViewModel.cancelSleepTimer() },
+                                                    onSelectThemeMode = { pulseViewModel.setThemeMode(it) },
+                                                    onToggleDynamicGlow = { pulseViewModel.setDynamicAlbumGlow(it) },
+                                                    onImportSafAudio = { uris, isCloud -> pulseViewModel.importSafAudio(uris, isCloud) },
+                                                    onSyncLocalLyrics = { pulseViewModel.syncLocalTracksMetadataAndLyrics() },
+                                                    onClearMetadataCache = { pulseViewModel.clearMetadataCache() },
+                                                    onConnectYouTube = { showYouTubeSignInDialog = true },
+                                                    onDisconnectYouTube = { pulseViewModel.disconnectYouTubeSession() },
+                                                    onSignOut = {
+                                                        signOutUser(credentialManager, scope, onSignOutComplete = onSignOutComplete)
+                                                    }
+                                                )
                                             }
                                         }
-                                    )
+                                    }
                                 }
                             }
 
                             composable<PulseRoomRoute> { entry ->
                                 val route = entry.toRoute<PulseRoomRoute>()
+                                val roomPlaybackState by pulseViewModel.playbackState.collectAsStateWithLifecycle()
                                 LaunchedEffect(route.roomId, isSignedIn) {
                                     if (isSignedIn && socialViewModel != null && activeRoom?.id != route.roomId) {
                                         socialViewModel.observePulseRoomSession(route.roomId)
@@ -665,7 +747,7 @@ private fun AuthenticatedPulseApp(
                                     room = activeRoom,
                                     queue = activeRoomQueue,
                                     reactions = activeRoomReactions,
-                                    playbackState = playbackState,
+                                    playbackState = roomPlaybackState,
                                     libraryTracks = libraryTracks,
                                     onBack = { navController.popBackStack() },
                                     onEndOrLeaveRoom = {
@@ -681,7 +763,7 @@ private fun AuthenticatedPulseApp(
                                         preset?.let { pulseViewModel.applySoundscapePreset(it) }
                                     },
                                     onHostBroadcastPlayback = { track, playing, posMs, presetName ->
-                                        if (playbackState.currentTrack?.id != track.id) {
+                                        if (roomPlaybackState.currentTrack?.id != track.id) {
                                             pulseViewModel.playTrack(track)
                                         }
                                         socialViewModel?.syncHostRoomState(route.roomId, track, playing, posMs, presetName)
@@ -693,14 +775,10 @@ private fun AuthenticatedPulseApp(
                             }
                         }
 
-                        // Persistent MiniPlayer anchored cleanly above navigation bar
-                        val activeTrack = playbackState.currentTrack
+                        // Persistent MiniPlayer anchored cleanly above navigation bar (isolated from tab pager state)
                         if (activeTrack != null && !showNowPlaying && !isOnRoomRoute) {
-                            MiniPlayerBar(
-                                track = activeTrack,
-                                isPlaying = playbackState.isPlaying,
-                                positionMs = playbackState.positionMs,
-                                durationMs = playbackState.durationMs,
+                            LiveMiniPlayerOverlay(
+                                playbackStateFlow = pulseViewModel.playbackState,
                                 onTogglePlay = { pulseViewModel.playbackController.togglePlayPause() },
                                 onSkipNext = { pulseViewModel.playbackController.skipNext() },
                                 onOpenNowPlaying = { showNowPlaying = true },
@@ -714,16 +792,17 @@ private fun AuthenticatedPulseApp(
                 }
             }
 
-            if (showNowPlaying && playbackState.currentTrack != null) {
+            if (showNowPlaying && activeTrack != null) {
+                val nowPlayingState by pulseViewModel.playbackState.collectAsStateWithLifecycle()
                 NowPlayingScreen(
-                    playbackState = playbackState,
+                    playbackState = nowPlayingState,
                     parsedLyrics = parsedLyrics,
                     isLoadingLyrics = isLoadingLyrics,
                     aiTrackStory = aiTrackStory,
                     lyricNotes = activeLyricNotes,
                     sonicDna = sonicDna,
                     albumAccent = albumAccent,
-                    downloadProgress = downloadProgress[playbackState.currentTrack?.id],
+                    downloadProgress = downloadProgress[nowPlayingState.currentTrack?.id],
                     activePulseRoom = joinedPulseRoom,
                     currentUserId = uid,
                     isSignedIn = isSignedIn,
@@ -763,7 +842,7 @@ private fun AuthenticatedPulseApp(
                                 roomName = roomName,
                                 moodTag = moodTag,
                                 track = track,
-                                soundscapePreset = playbackState.activeSoundscape.name
+                                soundscapePreset = activeSoundscape.name
                             ) { createdId ->
                                 navController.navigate(PulseRoomRoute(createdId))
                             }
@@ -796,7 +875,7 @@ private fun AuthenticatedPulseApp(
                 shareTargetTrack?.let { track ->
                     ShareMusicSheet(
                         track = track,
-                        activeSoundscapeName = playbackState.activeSoundscape.name,
+                        activeSoundscapeName = activeSoundscape.name,
                         friends = connectedFriends.ifEmpty { allUsers.filter { it.userId != uid } },
                         playlists = playlists,
                         activeRoomId = activeRoom?.id,
@@ -806,7 +885,7 @@ private fun AuthenticatedPulseApp(
                                 caption = caption,
                                 postType = "TRACK",
                                 lyricQuote = lyricQuote,
-                                soundscapeLabel = playbackState.activeSoundscape.name
+                                soundscapeLabel = activeSoundscape.name
                             )
                         },
                         onSendToFriendDm = { friend, text ->
@@ -846,4 +925,26 @@ private fun AuthenticatedPulseApp(
             }
         }
     }
+}
+
+@Composable
+private fun LiveMiniPlayerOverlay(
+    playbackStateFlow: StateFlow<PlaybackUiState>,
+    onTogglePlay: () -> Unit,
+    onSkipNext: () -> Unit,
+    onOpenNowPlaying: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val state by playbackStateFlow.collectAsStateWithLifecycle()
+    val track = state.currentTrack ?: return
+    MiniPlayerBar(
+        track = track,
+        isPlaying = state.isPlaying,
+        positionMs = state.positionMs,
+        durationMs = state.durationMs,
+        onTogglePlay = onTogglePlay,
+        onSkipNext = onSkipNext,
+        onOpenNowPlaying = onOpenNowPlaying,
+        modifier = modifier
+    )
 }

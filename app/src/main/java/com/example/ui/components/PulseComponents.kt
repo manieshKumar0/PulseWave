@@ -118,6 +118,7 @@ fun PulseWaveBrandLogo(
                 .testTag("pulsewave_brand_logo"),
             shape = RoundedCornerShape(corner),
             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f),
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
             border = BorderStroke(
                 width = 1.dp,
                 brush = Brush.linearGradient(
@@ -206,6 +207,7 @@ fun ObsidianGlassCard(
         modifier = baseModifier,
         shape = shape,
         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.90f),
+        contentColor = MaterialTheme.colorScheme.onSurface,
         border = BorderStroke(
             width = 1.dp,
             brush = Brush.linearGradient(
@@ -922,6 +924,7 @@ fun GoogleSignInGateCard(
             Surface(
                 shape = CircleShape,
                 color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                 modifier = Modifier.size(54.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {

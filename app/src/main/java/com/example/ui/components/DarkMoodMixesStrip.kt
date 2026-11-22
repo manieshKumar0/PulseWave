@@ -66,7 +66,7 @@ import com.example.ui.theme.MintElectric
 import com.example.ui.theme.PlusJakartaSansFontFamily
 import kotlin.math.roundToInt
 
-private val MoodHeadingInkDark = Color(0xFFF1ECF8)
+private val MoodHeadingInkDark = Color.White
 private val MoodHeadingInkLight = Color(0xFF14102B)
 private val MoodLinkDark = Color(0xFFB79CF0)
 private val MoodLinkLight = Color(0xFF6C47FF)

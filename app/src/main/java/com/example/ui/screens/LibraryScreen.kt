@@ -696,6 +696,7 @@ private fun CollaborativePlaylistCard(
             parsed.take(8).forEach { item ->
                 Surface(
                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                     shape = RoundedCornerShape(14.dp)
                 ) {
                     Row(

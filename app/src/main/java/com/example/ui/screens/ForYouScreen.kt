@@ -47,9 +47,9 @@ import com.example.data.model.DiscoveryFeedBundle
 import com.example.data.model.RecommendedPick
 import com.example.data.model.Track
 import com.example.data.model.TrackSourceType
-import com.example.ui.components.AskAiDjBanner
 import com.example.ui.components.DarkMoodMixesStrip
 import com.example.ui.components.MoodMixSpec
+import com.example.ui.components.MosaicTileSpecs
 import com.example.ui.components.MusicMosaicDarkSection
 import com.example.ui.components.ObsidianGlassCard
 import com.example.ui.components.PulseScreenHeader
@@ -69,7 +69,6 @@ fun ForYouScreen(
     offlineMode: Boolean,
     onRefreshWithMood: (String?) -> Unit,
     onPlayMoodMix: (MoodMixSpec) -> Unit,
-    onAskAiDj: (String) -> Unit,
     onPlayTrack: (Track, List<Track>) -> Unit,
     onToggleLike: (Track) -> Unit,
     onDownloadClick: (Track) -> Unit,
@@ -93,7 +92,11 @@ fun ForYouScreen(
                             .minimumInteractiveComponentSize()
                             .testTag("refresh_recommendations_button")
                     ) {
-                        Icon(Icons.Rounded.Refresh, contentDescription = "Refresh recommendations")
+                        Icon(
+                            imageVector = Icons.Rounded.Refresh,
+                            contentDescription = "Refresh recommendations",
+                            tint = MaterialTheme.colorScheme.onBackground
+                        )
                     }
                 }
             )
@@ -147,7 +150,7 @@ fun ForYouScreen(
                     .distinctBy { it.id }
                 val mosaicTracks = ytMosaicPool
                     .ifEmpty { allQueue }
-                    .take(18)
+                    .take(MosaicTileSpecs.size)
 
                 if (bundle.heroPicks.isEmpty() && mosaicTracks.isEmpty()) {
                     item {
@@ -201,12 +204,6 @@ fun ForYouScreen(
                                 }
                             )
                         }
-                    }
-
-                    item(key = "ask_ai_dj_banner") {
-                        AskAiDjBanner(
-                            onSubmitPrompt = onAskAiDj
-                        )
                     }
 
                     if (bundle.heroPicks.isNotEmpty()) {

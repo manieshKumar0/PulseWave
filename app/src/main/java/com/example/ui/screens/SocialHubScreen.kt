@@ -495,6 +495,7 @@ private fun FeedTab(
                                     if (post.soundscapeLabel.isNotBlank()) {
                                         Surface(
                                             color = UltravioletPulse.copy(alpha = 0.18f),
+                                            contentColor = MaterialTheme.colorScheme.secondary,
                                             shape = RoundedCornerShape(10.dp)
                                         ) {
                                             Text(
@@ -528,6 +529,7 @@ private fun FeedTab(
 
                                 Surface(
                                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f),
+                                    contentColor = MaterialTheme.colorScheme.onSurface,
                                     shape = RoundedCornerShape(16.dp),
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -913,6 +915,7 @@ private fun MessagesTab(
                                     "TRACK" -> {
                                         Surface(
                                             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+                                            contentColor = MaterialTheme.colorScheme.onSurface,
                                             shape = RoundedCornerShape(12.dp),
                                             modifier = Modifier
                                                 .fillMaxWidth()
@@ -949,6 +952,7 @@ private fun MessagesTab(
                                     "SOUNDSCAPE", "PLAYLIST" -> {
                                         Surface(
                                             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+                                            contentColor = MaterialTheme.colorScheme.onSurface,
                                             shape = RoundedCornerShape(12.dp),
                                             modifier = Modifier.fillMaxWidth()
                                         ) {

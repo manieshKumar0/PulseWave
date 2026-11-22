@@ -99,6 +99,7 @@ fun EqualizerControlPanel(
                         } else {
                             MaterialTheme.colorScheme.surfaceVariant
                         },
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(40.dp)
                     ) {
                         Icon(
@@ -311,6 +312,7 @@ private fun EqualizerCurvePreview(
     Surface(
         shape = RoundedCornerShape(14.dp),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier
             .fillMaxWidth()
             .height(74.dp)

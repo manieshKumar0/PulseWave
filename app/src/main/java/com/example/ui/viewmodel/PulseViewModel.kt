@@ -328,7 +328,7 @@ class PulseViewModel(
                                 youTubeClient.fetchLikedBasedRecommendations(
                                     likedTracks = likedTracks,
                                     preferredGenres = preferredGenres,
-                                    limit = 20
+                                    limit = 24
                                 )
                             } catch (e: CancellationException) {
                                 throw e
@@ -373,7 +373,7 @@ class PulseViewModel(
                         .filter { it.sourceType == TrackSourceType.YOUTUBE })
                     .filter { it.sourceType == TrackSourceType.YOUTUBE }
                     .distinctBy { it.id }
-                    .take(20)
+                    .take(24)
 
                 _discoveryState.value = UiState.Success(
                     bundle.copy(youtubeLikedRecs = ytOnlyBento)
@@ -405,7 +405,7 @@ class PulseViewModel(
         if (settings.value.offlineMode) return
         likedRecsJob?.cancel()
         likedRecsJob = viewModelScope.launch {
-            delay(250L)
+            delay(120L)
             runCatching {
                 val roomSnapshot = libraryRepo.getAllTracksSnapshot()
                 val signals = libraryRepo.getRecentSignals()
@@ -415,7 +415,7 @@ class PulseViewModel(
                 val freshYtRecs = youTubeClient.fetchLikedBasedRecommendations(
                     likedTracks = likedTracks,
                     preferredGenres = liveDna.topGenres,
-                    limit = 20
+                    limit = 24
                 )
                     .filter { it.sourceType == TrackSourceType.YOUTUBE }
                     .distinctBy { it.id }

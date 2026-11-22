@@ -92,6 +92,7 @@ fun CreatePulseRoomDialog(
                 if (seedTrack != null) {
                     Surface(
                         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                         shape = RoundedCornerShape(12.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {

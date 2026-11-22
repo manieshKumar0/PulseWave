@@ -702,26 +702,28 @@ class YouTubeMusicClient internal constructor(
     suspend fun fetchLikedBasedRecommendations(
         likedTracks: List<Track>,
         preferredGenres: List<String> = emptyList(),
-        limit: Int = 12
+        limit: Int = 24
     ): List<Track> = withContext(Dispatchers.IO) {
+        val likedArtists = extractLikedArtistSeeds(likedTracks)
         val ytLikedSeeds = likedTracks
             .mapNotNull { track -> track.youtubeVideoId?.let { vid -> vid to track } }
             .distinctBy { it.first }
             .take(3)
         val seedVideoIdSet = likedTracks.mapNotNull { it.youtubeVideoId }.toSet()
+        val seedTrackKeySet = likedTracks.map { it.trackKey }.toSet()
 
         val radioBatches = if (ytLikedSeeds.isNotEmpty()) {
             coroutineScope {
                 ytLikedSeeds.take(2).map { (videoId, seedTrack) ->
                     async {
                         val nextRecs = runCatching {
-                            queryWebRemixNextRecommendations(videoId = videoId, limit = 10)
+                            queryWebRemixNextRecommendations(videoId = videoId, limit = 12)
                         }.getOrDefault(emptyList())
                         val raw = if (nextRecs.isNotEmpty()) {
                             nextRecs
                         } else {
                             runCatching {
-                                fetchRelatedViaNewPipe(videoId = videoId, limit = 8)
+                                fetchRelatedViaNewPipe(videoId = videoId, limit = 10)
                             }.getOrDefault(emptyList())
                         }
                         raw.map { rec ->
@@ -740,7 +742,7 @@ class YouTubeMusicClient internal constructor(
             likedTracks = likedTracks,
             preferredGenres = preferredGenres
         )
-        val perQuery = ((limit / likedQueries.size.coerceAtLeast(1)) + 3).coerceIn(6, 12)
+        val perQuery = ((limit / likedQueries.size.coerceAtLeast(1)) + 5).coerceIn(8, 16)
         val searchBatches = coroutineScope {
             likedQueries.map { q ->
                 async {
@@ -758,44 +760,28 @@ class YouTubeMusicClient internal constructor(
             }.awaitAll()
         }
 
-        val merged = LinkedHashMap<String, Track>()
-        val combinedBatches = radioBatches + searchBatches
-        val maxBatchSize = combinedBatches.maxOfOrNull { it.size } ?: 0
+        val prioritized = rankLikedArtistRecommendations(
+            likedArtists = likedArtists,
+            seedVideoIds = seedVideoIdSet,
+            seedTrackKeys = seedTrackKeySet,
+            artistSearchBatches = searchBatches,
+            radioBatches = radioBatches,
+            limit = limit
+        ).toMutableList()
 
-        // Pass 1: prioritize fresh recommended YouTube songs (excluding the seed tracks themselves)
-        for (idx in 0 until maxBatchSize) {
-            for (batch in combinedBatches) {
-                val track = batch.getOrNull(idx) ?: continue
-                if (track.sourceType != TrackSourceType.YOUTUBE) continue
-                val vid = track.youtubeVideoId
-                if (vid != null && vid in seedVideoIdSet) continue
-                if (merged.size < limit) {
-                    merged.putIfAbsent(track.id, track)
-                }
-            }
-            if (merged.size >= limit) break
-        }
-
-        // Pass 2: if fewer than target limit, allow liked YouTube tracks or NewPipe fallback
-        if (merged.size < limit) {
-            for (batch in combinedBatches) {
-                for (track in batch) {
-                    if (track.sourceType != TrackSourceType.YOUTUBE) continue
-                    if (merged.size < limit) {
-                        merged.putIfAbsent(track.id, track)
-                    }
-                }
-            }
-        }
-
-        if (merged.isEmpty() && likedQueries.isNotEmpty()) {
+        if (prioritized.isEmpty() && likedQueries.isNotEmpty()) {
             runCatching { searchViaNewPipe(likedQueries.first(), limit) }
                 .getOrDefault(emptyList())
                 .filter { it.sourceType == TrackSourceType.YOUTUBE }
-                .forEach { merged.putIfAbsent(it.id, it) }
+                .filterNot { isCompilationSpamTrack(it) }
+                .forEach { t ->
+                    if (prioritized.none { it.id == t.id } && prioritized.size < limit) {
+                        prioritized.add(t)
+                    }
+                }
         }
 
-        merged.values.take(limit)
+        prioritized.take(limit)
     }
 
     // Speculative background prewarming of search/feed catalogs intentionally removed:
@@ -2615,43 +2601,166 @@ class YouTubeMusicClient internal constructor(
             }.distinct().take(3)
         }
 
+        private val LIKED_IGNORED_ARTISTS = setOf(
+            "youtube music",
+            "youtube",
+            "local device",
+            "cloud drive",
+            "unknown artist",
+            "single",
+            "various artists"
+        )
+
+        private val ARTIST_SPLIT_REGEX = Regex("""\s*(?:,|&|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b|\bx\b)\s*""", RegexOption.IGNORE_CASE)
+        private val COMPILATION_TITLE_REGEX = Regex(
+            """\b(\d+\s*hours?|full\s+album|jukebox|nonstop|non-stop|megamix|top\s+hits\s+\d{4}|best\s+songs\s+\d{4}|study\s+beats|sleep\s+music)\b""",
+            RegexOption.IGNORE_CASE
+        )
+
+        internal fun extractLikedArtistSeeds(likedTracks: List<Track>): List<String> {
+            val seenLower = LinkedHashSet<String>()
+            val out = mutableListOf<String>()
+            for (track in likedTracks) {
+                val rawArtist = track.artist.trim()
+                if (rawArtist.isBlank()) continue
+                val primary = rawArtist.split(ARTIST_SPLIT_REGEX).firstOrNull()?.trim().orEmpty()
+                val candidates = listOf(primary, rawArtist).filter {
+                    it.isNotBlank() && it.lowercase() !in LIKED_IGNORED_ARTISTS
+                }
+                for (candidate in candidates) {
+                    if (seenLower.add(candidate.lowercase())) {
+                        out.add(candidate)
+                        break
+                    }
+                }
+            }
+            return out
+        }
+
+        internal fun isCompilationSpamTrack(track: Track): Boolean {
+            if (track.durationMs > 600_000L) return true
+            return COMPILATION_TITLE_REGEX.containsMatchIn(track.title)
+        }
+
+        internal fun artistMatchesSeed(trackArtist: String, likedArtist: String): Boolean {
+            val a = trackArtist.trim().lowercase()
+            val seed = likedArtist.trim().lowercase()
+            if (a.isBlank() || seed.isBlank()) return false
+            return a == seed || a.contains(seed) || seed.contains(a)
+        }
+
+        internal fun rankLikedArtistRecommendations(
+            likedArtists: List<String>,
+            seedVideoIds: Set<String>,
+            seedTrackKeys: Set<String>,
+            artistSearchBatches: List<List<Track>>,
+            radioBatches: List<List<Track>>,
+            limit: Int = 24
+        ): List<Track> {
+            val merged = LinkedHashMap<String, Track>()
+            val allBatches = artistSearchBatches + radioBatches
+
+            fun isSeed(t: Track): Boolean {
+                val vid = t.youtubeVideoId
+                return (vid != null && vid in seedVideoIds) || t.trackKey in seedTrackKeys
+            }
+
+            // Tier 1: Round-robin fresh non-compilation songs by the user's liked artists
+            if (likedArtists.isNotEmpty()) {
+                val artistBuckets = likedArtists.map { artist ->
+                    allBatches.flatten()
+                        .asSequence()
+                        .filter { it.sourceType == TrackSourceType.YOUTUBE }
+                        .filter { !isSeed(it) && !isCompilationSpamTrack(it) }
+                        .filter { artistMatchesSeed(it.artist, artist) }
+                        .distinctBy { it.id }
+                        .toList()
+                }
+                val maxBucket = artistBuckets.maxOfOrNull { it.size } ?: 0
+                for (idx in 0 until maxBucket) {
+                    for (bucket in artistBuckets) {
+                        val track = bucket.getOrNull(idx) ?: continue
+                        if (merged.size < limit) merged.putIfAbsent(track.id, track)
+                    }
+                    if (merged.size >= limit) break
+                }
+            }
+
+            // Tier 2: Fresh non-compilation related/radio YouTube songs
+            if (merged.size < limit) {
+                val combined = radioBatches + artistSearchBatches
+                val maxLen = combined.maxOfOrNull { it.size } ?: 0
+                for (idx in 0 until maxLen) {
+                    for (batch in combined) {
+                        val track = batch.getOrNull(idx) ?: continue
+                        if (track.sourceType != TrackSourceType.YOUTUBE) continue
+                        if (isSeed(track) || isCompilationSpamTrack(track)) continue
+                        if (merged.size < limit) merged.putIfAbsent(track.id, track)
+                    }
+                    if (merged.size >= limit) break
+                }
+            }
+
+            // Tier 3: Any remaining non-compilation YouTube tracks (e.g. seeds if pool is still small)
+            if (merged.size < limit) {
+                for (batch in (artistSearchBatches + radioBatches)) {
+                    for (track in batch) {
+                        if (track.sourceType != TrackSourceType.YOUTUBE) continue
+                        if (isCompilationSpamTrack(track)) continue
+                        if (merged.size < limit) merged.putIfAbsent(track.id, track)
+                    }
+                    if (merged.size >= limit) break
+                }
+            }
+
+            return merged.values.take(limit)
+        }
+
         internal fun buildLikedRecommendationQueries(
             likedTracks: List<Track>,
             preferredGenres: List<String> = emptyList()
         ): List<String> {
-            val ignoredNames = setOf("youtube music", "youtube", "local device", "cloud drive", "unknown artist", "single")
             val queries = mutableListOf<String>()
+            val validArtists = extractLikedArtistSeeds(likedTracks)
 
-            val validArtists = likedTracks
-                .map { it.artist.trim() }
-                .filter { it.isNotBlank() && it.lowercase() !in ignoredNames }
-                .distinct()
-
-            val validSongSeeds = likedTracks
-                .filter { it.title.isNotBlank() && it.artist.trim().lowercase() !in ignoredNames }
-                .distinctBy { it.trackKey }
-
-            // Seed queries from specific liked songs and artists
-            validSongSeeds.take(2).forEach { seed ->
-                queries.add("${seed.artist} ${seed.title} similar songs")
-            }
-            validArtists.take(3).forEach { artist ->
-                queries.add("$artist top hits songs")
+            when {
+                validArtists.size == 1 -> {
+                    val artist = validArtists.first()
+                    queries.add("$artist songs")
+                    queries.add("$artist hits")
+                }
+                validArtists.size > 1 -> {
+                    validArtists.take(4).forEach { artist ->
+                        queries.add("$artist songs")
+                    }
+                }
             }
 
-            val likedGenres = (likedTracks.map { it.genre } + preferredGenres)
-                .map { it.trim() }
-                .filter { it.isNotBlank() && !it.equals("YouTube", true) && !it.equals("Imported", true) }
-                .distinct()
-            likedGenres.take(2).forEach { genre ->
-                queries.add("best $genre songs hits")
+            val seedTrack = likedTracks.firstOrNull { it.title.isNotBlank() && !isCompilationSpamTrack(it) }
+            if (seedTrack != null && queries.size < 5) {
+                val primaryArtist = seedTrack.artist.split(ARTIST_SPLIT_REGEX).firstOrNull()?.trim()
+                    ?.takeIf { it.isNotBlank() && it.lowercase() !in LIKED_IGNORED_ARTISTS }
+                val trackQuery = listOfNotNull(seedTrack.title.trim(), primaryArtist).joinToString(" ").trim()
+                if (trackQuery.isNotBlank()) {
+                    queries.add(trackQuery)
+                }
+            }
+
+            if (queries.size < 2) {
+                val likedGenres = (likedTracks.map { it.genre } + preferredGenres)
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() && !it.equals("YouTube", true) && !it.equals("Imported", true) }
+                    .distinct()
+                likedGenres.take(2).forEach { genre ->
+                    queries.add("best $genre songs")
+                }
             }
 
             if (queries.isEmpty()) {
                 queries.add("top trending global music hits")
                 queries.add("popular pop chill hits")
             }
-            return queries.distinct().take(4)
+            return queries.distinct().take(5)
         }
 
         internal fun parseWebRemixNextJson(rawJson: String, queryHint: String = ""): List<Track> {

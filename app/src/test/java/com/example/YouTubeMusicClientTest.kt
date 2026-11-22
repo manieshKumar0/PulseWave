@@ -777,4 +777,105 @@ class YouTubeMusicClientTest {
         assertTrue(capturedHeaders[1]["Authorization"].orEmpty().startsWith("SAPISIDHASH "))
         assertEquals("0", capturedHeaders[1]["X-Goog-AuthUser"])
     }
+
+    @Test
+    fun likedArtistRecommendationHelpers_extractQueriesAndPrioritizeNonCompilationSongs() {
+        val seed1 = Track(
+            id = "yt_seed1",
+            title = "Blinding Lights",
+            artist = "The Weeknd feat. Daft Punk",
+            durationMs = 200_000L,
+            sourceType = TrackSourceType.YOUTUBE,
+            genre = "Pop"
+        )
+        val seed2 = Track(
+            id = "yt_seed2",
+            title = "Levitating",
+            artist = "Dua Lipa, DaBaby",
+            durationMs = 203_000L,
+            sourceType = TrackSourceType.YOUTUBE,
+            genre = "Pop"
+        )
+        val unknownArtistTrack = Track(
+            id = "yt_seed3",
+            title = "Unknown Demo",
+            artist = "Unknown Artist",
+            durationMs = 180_000L,
+            sourceType = TrackSourceType.YOUTUBE
+        )
+
+        val seeds = YouTubeMusicClient.extractLikedArtistSeeds(listOf(seed1, seed2, unknownArtistTrack))
+        assertEquals(listOf("The Weeknd", "Dua Lipa"), seeds)
+
+        val queries = YouTubeMusicClient.buildLikedRecommendationQueries(listOf(seed1, seed2))
+        assertTrue(queries.contains("The Weeknd songs"))
+        assertTrue(queries.contains("Dua Lipa songs"))
+        assertTrue(queries.any { it.contains("Blinding Lights") })
+
+        val weekndFresh1 = Track(
+            id = "yt_w1",
+            title = "Starboy",
+            artist = "The Weeknd",
+            durationMs = 230_000L,
+            sourceType = TrackSourceType.YOUTUBE
+        )
+        val weekndFresh2 = Track(
+            id = "yt_w2",
+            title = "Save Your Tears",
+            artist = "The Weeknd",
+            durationMs = 215_000L,
+            sourceType = TrackSourceType.YOUTUBE
+        )
+        val duaFresh1 = Track(
+            id = "yt_d1",
+            title = "Don't Start Now",
+            artist = "Dua Lipa",
+            durationMs = 183_000L,
+            sourceType = TrackSourceType.YOUTUBE
+        )
+        val compilationSpam = Track(
+            id = "yt_spam1",
+            title = "3 Hours of Chill Lofi Music for DEEP Sleep",
+            artist = "The Weeknd",
+            durationMs = 10_800_000L,
+            sourceType = TrackSourceType.YOUTUBE
+        )
+        val radioFresh = Track(
+            id = "yt_r1",
+            title = "Midnight City",
+            artist = "M83",
+            durationMs = 243_000L,
+            sourceType = TrackSourceType.YOUTUBE
+        )
+
+        assertTrue(YouTubeMusicClient.isCompilationSpamTrack(compilationSpam))
+        assertFalse(YouTubeMusicClient.isCompilationSpamTrack(weekndFresh1))
+
+        val rankedTop4 = YouTubeMusicClient.rankLikedArtistRecommendations(
+            likedArtists = seeds,
+            seedVideoIds = setOf("seed1", "seed2"),
+            seedTrackKeys = setOf(seed1.trackKey, seed2.trackKey),
+            artistSearchBatches = listOf(
+                listOf(seed1, compilationSpam, weekndFresh1, weekndFresh2),
+                listOf(seed2, duaFresh1)
+            ),
+            radioBatches = listOf(listOf(radioFresh)),
+            limit = 4
+        )
+        assertEquals(listOf("yt_w1", "yt_d1", "yt_w2", "yt_r1"), rankedTop4.map { it.id })
+
+        val rankedFull = YouTubeMusicClient.rankLikedArtistRecommendations(
+            likedArtists = seeds,
+            seedVideoIds = setOf("seed1", "seed2"),
+            seedTrackKeys = setOf(seed1.trackKey, seed2.trackKey),
+            artistSearchBatches = listOf(
+                listOf(seed1, compilationSpam, weekndFresh1, weekndFresh2),
+                listOf(seed2, duaFresh1)
+            ),
+            radioBatches = listOf(listOf(radioFresh)),
+            limit = 24
+        )
+        assertFalse(rankedFull.any { it.id == "yt_spam1" })
+        assertEquals(listOf("yt_w1", "yt_d1", "yt_w2", "yt_r1"), rankedFull.take(4).map { it.id })
+    }
 }

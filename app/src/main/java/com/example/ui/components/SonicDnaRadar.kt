@@ -428,6 +428,11 @@ fun SonicDnaRadarChart(
                     } else {
                         MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
                     },
+                    contentColor = if (selected) {
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
                     border = BorderStroke(
                         width = 1.dp,
                         color = if (selected) primaryColor else MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
@@ -474,6 +479,7 @@ fun SonicDnaRadarChart(
             Surface(
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.62f),
+                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 border = BorderStroke(1.dp, primaryColor.copy(alpha = 0.25f)),
                 modifier = Modifier
                     .fillMaxWidth()
@@ -547,6 +553,7 @@ fun SonicDnaRadarChart(
         Surface(
             shape = RoundedCornerShape(14.dp),
             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.7f),
+            contentColor = MaterialTheme.colorScheme.onSurface,
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
             modifier = Modifier.fillMaxWidth()
         ) {

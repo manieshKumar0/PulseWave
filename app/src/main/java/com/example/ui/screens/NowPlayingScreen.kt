@@ -892,6 +892,7 @@ private fun LyricCanvasTab(
         } else {
             Surface(
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f),
+                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 shape = RoundedCornerShape(16.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
