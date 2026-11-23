@@ -1,6 +1,7 @@
 package com.example
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -45,6 +46,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -89,6 +91,7 @@ import com.example.domain.RecommendationEngine
 import com.example.domain.SafMusicImporter
 import com.example.media.PlaybackController
 import com.example.media.PlaybackUiState
+import com.example.media.PulseMediaService
 import com.example.ui.components.GoogleSignInRequiredDialog
 import com.example.ui.components.MiniPlayerBar
 import com.example.ui.components.PulseWaveBrandLogo
@@ -139,10 +142,13 @@ private data class SettingsPlaybackSnapshot(
 )
 
 class MainActivity : ComponentActivity() {
+    private val openNowPlayingSignal = mutableIntStateOf(0)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         configureAppCheck(this, intent)
         enableEdgeToEdge()
+        handlePlaybackIntent(intent)
 
         setContent {
             val currentUser by Firebase.auth.authStateFlow()
@@ -154,17 +160,17 @@ class MainActivity : ComponentActivity() {
                 contract = ActivityResultContracts.RequestPermission()
             ) { _ -> }
 
-            LaunchedEffect(currentUser?.uid) {
+            LaunchedEffect(currentUser?.uid, skipAuthForGuest) {
                 if (currentUser != null) {
                     skipAuthForGuest = false
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        val granted = ContextCompat.checkSelfPermission(
-                            this@MainActivity,
-                            Manifest.permission.POST_NOTIFICATIONS
-                        ) == PackageManager.PERMISSION_GRANTED
-                        if (!granted) {
-                            notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                        }
+                }
+                if ((currentUser != null || skipAuthForGuest) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    val granted = ContextCompat.checkSelfPermission(
+                        this@MainActivity,
+                        Manifest.permission.POST_NOTIFICATIONS
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (!granted) {
+                        notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                     }
                 }
             }
@@ -179,14 +185,29 @@ class MainActivity : ComponentActivity() {
             } else {
                 val isSignedIn = currentUser != null
                 val uid = currentUser?.uid ?: "guest"
+                val openSignal = openNowPlayingSignal.intValue
                 key(uid) {
                     AuthenticatedPulseApp(
                         uid = uid,
                         isSignedIn = isSignedIn,
+                        openNowPlayingSignal = openSignal,
+                        onConsumeOpenNowPlaying = { openNowPlayingSignal.intValue = 0 },
                         onSignOutComplete = { skipAuthForGuest = false }
                     )
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handlePlaybackIntent(intent)
+    }
+
+    private fun handlePlaybackIntent(intent: Intent?) {
+        if (intent?.getBooleanExtra(PulseMediaService.EXTRA_OPEN_NOW_PLAYING, false) == true) {
+            openNowPlayingSignal.intValue += 1
         }
     }
 }
@@ -195,6 +216,8 @@ class MainActivity : ComponentActivity() {
 private fun AuthenticatedPulseApp(
     uid: String,
     isSignedIn: Boolean,
+    openNowPlayingSignal: Int,
+    onConsumeOpenNowPlaying: () -> Unit,
     onSignOutComplete: () -> Unit
 ) {
     val context = LocalContext.current
@@ -328,6 +351,12 @@ private fun AuthenticatedPulseApp(
     val currentDestination = navBackStackEntry?.destination
 
     var showNowPlaying by remember { mutableStateOf(false) }
+    LaunchedEffect(openNowPlayingSignal, activeTrack?.id) {
+        if (openNowPlayingSignal > 0 && activeTrack != null) {
+            showNowPlaying = true
+            onConsumeOpenNowPlaying()
+        }
+    }
     var shareTargetTrack by remember { mutableStateOf<Track?>(null) }
     var isSigningIn by remember { mutableStateOf(false) }
     var pendingSignInFeature by remember { mutableStateOf<String?>(null) }

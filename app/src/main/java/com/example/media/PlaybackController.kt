@@ -2,14 +2,13 @@ package com.example.media
 
 import android.content.ComponentName
 import android.content.Context
-import android.net.Uri
 import android.os.Bundle
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
-import androidx.media3.common.MediaMetadata
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -122,41 +121,99 @@ class PlaybackController internal constructor(
         resolvePlayJob?.cancel(CancellationException("Playback cancelled"))
     }
 
+    private inline fun runOnPlayerThread(crossinline block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            block()
+        } else {
+            scope.launch {
+                block()
+            }
+        }
+    }
+
     init {
         if (injectedPlayer != null) {
             mediaController = injectedPlayer
-            attachPlayerListener(injectedPlayer)
-            applyCurrentDsp()
-            startProgressLoop()
+            runOnPlayerThread {
+                attachPlayerListener(injectedPlayer)
+                syncFromPlayer(injectedPlayer)
+                applyCurrentDsp()
+                startProgressLoop()
+            }
         } else if (autoConnectController) {
-            connectController()
+            runOnPlayerThread {
+                connectController()
+            }
         }
     }
 
     private fun connectController() {
-        if (controllerFuture != null || mediaController != null) return
-        val token = SessionToken(context, ComponentName(context, PulseMediaService::class.java))
-        val future = MediaController.Builder(context, token).buildAsync()
-        controllerFuture = future
-        future.addListener({
-            try {
-                val controller = future.get()
-                mediaController = controller
-                attachPlayerListener(controller)
-                applyCurrentDsp()
-                startProgressLoop()
-                pendingPlayRequest?.let { pending ->
-                    pendingPlayRequest = null
-                    playTrack(pending.track, pending.queue, forceRefresh = pending.forceRefresh)
+        runOnPlayerThread {
+            if (controllerFuture != null || mediaController != null) return@runOnPlayerThread
+            val token = SessionToken(context, ComponentName(context, PulseMediaService::class.java))
+            val future = MediaController.Builder(context, token)
+                .setApplicationLooper(Looper.getMainLooper())
+                .buildAsync()
+            controllerFuture = future
+            future.addListener({
+                try {
+                    val controller = future.get()
+                    mediaController = controller
+                    attachPlayerListener(controller)
+                    applyCurrentDsp()
+                    val pending = pendingPlayRequest
+                    if (pending != null) {
+                        pendingPlayRequest = null
+                        playTrack(pending.track, pending.queue, forceRefresh = pending.forceRefresh)
+                    } else {
+                        syncFromPlayer(controller)
+                    }
+                    startProgressLoop()
+                } catch (_: Exception) {
+                    controllerFuture = null
                 }
-            } catch (_: Exception) {
-                controllerFuture = null
-            }
-        }, ContextCompat.getMainExecutor(context))
+            }, ContextCompat.getMainExecutor(context))
+        }
+    }
+
+    internal fun syncFromPlayer(controller: Player) {
+        val count = controller.mediaItemCount
+        if (count <= 0) return
+        val restoredQueue = (0 until count).mapNotNull { idx ->
+            PulseMediaItemMapper.fromMediaItem(controller.getMediaItemAt(idx))
+        }
+        if (restoredQueue.isEmpty()) return
+        val idx = controller.currentMediaItemIndex.coerceIn(0, restoredQueue.lastIndex)
+        val activeTrack = restoredQueue[idx]
+        lastTrackId = activeTrack.id
+        if (activeTrack.youtubeVideoId != null && !activeTrack.isDownloaded) {
+            hasHandedUriForCurrentAttempt = true
+        }
+        _state.update {
+            it.copy(
+                currentTrack = activeTrack,
+                queue = restoredQueue,
+                currentIndex = idx,
+                isPlaying = controller.isPlaying,
+                isBuffering = controller.playbackState == Player.STATE_BUFFERING,
+                positionMs = controller.currentPosition.coerceAtLeast(0L),
+                durationMs = controller.duration.takeIf { d -> d > 0L } ?: activeTrack.durationMs,
+                shuffleEnabled = controller.shuffleModeEnabled,
+                repeatMode = controller.repeatMode,
+                playbackError = null
+            )
+        }
     }
 
     private fun attachPlayerListener(controller: Player) {
         controller.addListener(object : Player.Listener {
+            override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
+                _state.update { it.copy(shuffleEnabled = shuffleModeEnabled) }
+            }
+
+            override fun onRepeatModeChanged(repeatMode: Int) {
+                _state.update { it.copy(repeatMode = repeatMode) }
+            }
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 if (!isPlaying) {
                     AudioSpectrumBus.setPlaybackActive(false)
@@ -199,6 +256,7 @@ class PlaybackController internal constructor(
                 val idx = controller.currentMediaItemIndex
                 val queue = _state.value.queue
                 val nextTrack = queue.getOrNull(idx)
+                    ?: mediaItem?.let { PulseMediaItemMapper.fromMediaItem(it) }
                 if (nextTrack != null) {
                     lastTrackId = nextTrack.id
                     lastRetriedYouTubeId = null
@@ -636,7 +694,9 @@ class PlaybackController internal constructor(
         _state.update { it.copy(crossfadeSeconds = clamped) }
         if (clamped == 0) {
             fadeInDurationMs = 0L
-            mediaController?.volume = 1f
+            runOnPlayerThread {
+                mediaController?.volume = 1f
+            }
         }
     }
 
@@ -679,7 +739,9 @@ class PlaybackController internal constructor(
         sleepTimerJob?.cancel()
         sleepTimerJob = null
         sleepTimerEndRealtimeMs = null
-        mediaController?.volume = 1f
+        runOnPlayerThread {
+            mediaController?.volume = 1f
+        }
         _state.update {
             it.copy(
                 sleepTimerRemainingMs = null,
@@ -762,36 +824,40 @@ class PlaybackController internal constructor(
             )
         }
 
-        val controller = mediaController
-        if (controller == null) {
-            pendingPlayRequest = PendingPlayRequest(track, safeQueue, forceRefresh)
-            connectController()
-            return
-        }
-
-        if (!needsRemoteResolution) {
-            val mediaItems = safeQueue.mapNotNull { it.toMediaItemOrNull() }
-            if (mediaItems.isEmpty()) {
-                controller.pause()
-                controller.stop()
-                controller.clearMediaItems()
-                _state.update {
-                    it.copy(isPlaying = false, isBuffering = false, positionMs = 0L, playbackError = "No playable audio URI for this track")
-                }
-                return
+        runOnPlayerThread {
+            val controller = mediaController
+            if (controller == null) {
+                pendingPlayRequest = PendingPlayRequest(track, safeQueue, forceRefresh)
+                connectController()
+                return@runOnPlayerThread
             }
-            val safeIdx = targetIndex.coerceIn(0, mediaItems.lastIndex)
-            triggerFadeInIfEnabled(controller)
-            controller.setMediaItems(mediaItems, safeIdx, 0L)
-            controller.prepare()
-            controller.play()
-            return
+
+            if (!needsRemoteResolution) {
+                val mediaItems = safeQueue.mapNotNull { it.toMediaItemOrNull() }
+                if (mediaItems.isEmpty()) {
+                    controller.pause()
+                    controller.stop()
+                    controller.clearMediaItems()
+                    _state.update {
+                        it.copy(isPlaying = false, isBuffering = false, positionMs = 0L, playbackError = "No playable audio URI for this track")
+                    }
+                    return@runOnPlayerThread
+                }
+                val safeIdx = targetIndex.coerceIn(0, mediaItems.lastIndex)
+                triggerFadeInIfEnabled(controller)
+                controller.setMediaItems(mediaItems, safeIdx, 0L)
+                controller.prepare()
+                controller.play()
+                return@runOnPlayerThread
+            }
+
+            // Stop any previous track so prior audio/position does not bleed into a resolving or failed track
+            controller.pause()
+            controller.stop()
+            controller.clearMediaItems()
         }
 
-        // Stop any previous track so prior audio/position does not bleed into a resolving or failed track
-        controller.pause()
-        controller.stop()
-        controller.clearMediaItems()
+        if (!needsRemoteResolution) return
 
         val videoId = track.youtubeVideoId!!
         val corrId = "pb-${playbackAttemptSeq.incrementAndGet()}"
@@ -868,16 +934,24 @@ class PlaybackController internal constructor(
                     }
                     return@launch
                 }
+                val controller = mediaController
+                if (controller == null) {
+                    pendingPlayRequest = PendingPlayRequest(track, safeQueue, forceRefresh = false)
+                    connectController()
+                    return@launch
+                }
                 val safeIdx = targetIndex.coerceIn(0, mediaItems.lastIndex)
                 hasHandedUriForCurrentAttempt = true
                 Log.i(
                     "PULSE_YT_RESOLVER",
                     "stage_event corr=$corrId stage=MEDIA3_HANDOFF source=PLAY_TRACK trackId=${track.id} videoId=$videoId startTsMs=$reqStartTsMs endTsMs=$endTsMs durationMs=$elapsedMs outcome=SUCCESS isHls=${stream.isHls} format=${resolvedMime ?: stream.mimeType} host=${YouTubeMusicClient.redactHostOnly(stream.url)} queueIndex=$safeIdx queueSize=${mediaItems.size}"
                 )
-                triggerFadeInIfEnabled(controller)
-                controller.setMediaItems(mediaItems, safeIdx, 0L)
-                controller.prepare()
-                controller.play()
+                runOnPlayerThread {
+                    triggerFadeInIfEnabled(controller)
+                    controller.setMediaItems(mediaItems, safeIdx, 0L)
+                    controller.prepare()
+                    controller.play()
+                }
             } catch (e: CancellationException) {
                 val endTsMs = System.currentTimeMillis()
                 val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
@@ -921,56 +995,69 @@ class PlaybackController internal constructor(
         if (resolvePlayJob?.isActive == true) {
             return
         }
-        val controller = mediaController ?: return
-        if (controller.mediaItemCount == 0 && _state.value.currentTrack != null) {
-            retryActiveTrack()
-            return
+        runOnPlayerThread {
+            val controller = mediaController ?: return@runOnPlayerThread
+            if (controller.mediaItemCount == 0 && _state.value.currentTrack != null) {
+                retryActiveTrack()
+                return@runOnPlayerThread
+            }
+            if (controller.isPlaying) controller.pause() else controller.play()
         }
-        if (controller.isPlaying) controller.pause() else controller.play()
     }
 
     fun seekTo(positionMs: Long) {
-        val controller = mediaController ?: return
-        if (positionMs < controller.currentPosition - 3_000L) {
-            seekBackCounter++
+        val safePos = positionMs.coerceAtLeast(0L)
+        _state.update { it.copy(positionMs = safePos) }
+        runOnPlayerThread {
+            val controller = mediaController ?: return@runOnPlayerThread
+            if (safePos < controller.currentPosition - 3_000L) {
+                seekBackCounter++
+            }
+            controller.seekTo(safePos)
         }
-        controller.seekTo(positionMs.coerceAtLeast(0L))
-        _state.update { it.copy(positionMs = positionMs.coerceAtLeast(0L)) }
     }
 
     fun skipNext() {
-        val controller = mediaController ?: return
-        if (controller.hasNextMediaItem()) {
-            controller.seekToNextMediaItem()
+        runOnPlayerThread {
+            val controller = mediaController ?: return@runOnPlayerThread
+            if (controller.hasNextMediaItem()) {
+                controller.seekToNextMediaItem()
+            }
         }
     }
 
     fun skipPrevious() {
-        val controller = mediaController ?: return
-        if (controller.currentPosition > 4_000L) {
-            seekBackCounter++
-            controller.seekTo(0L)
-        } else if (controller.hasPreviousMediaItem()) {
-            controller.seekToPreviousMediaItem()
+        runOnPlayerThread {
+            val controller = mediaController ?: return@runOnPlayerThread
+            if (controller.currentPosition > 4_000L) {
+                seekBackCounter++
+                controller.seekTo(0L)
+            } else if (controller.hasPreviousMediaItem()) {
+                controller.seekToPreviousMediaItem()
+            }
         }
     }
 
     fun toggleShuffle() {
-        val controller = mediaController ?: return
-        val next = !controller.shuffleModeEnabled
-        controller.shuffleModeEnabled = next
-        _state.update { it.copy(shuffleEnabled = next) }
+        runOnPlayerThread {
+            val controller = mediaController ?: return@runOnPlayerThread
+            val next = !controller.shuffleModeEnabled
+            controller.shuffleModeEnabled = next
+            _state.update { it.copy(shuffleEnabled = next) }
+        }
     }
 
     fun cycleRepeatMode() {
-        val controller = mediaController ?: return
-        val next = when (controller.repeatMode) {
-            Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
-            Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
-            else -> Player.REPEAT_MODE_OFF
+        runOnPlayerThread {
+            val controller = mediaController ?: return@runOnPlayerThread
+            val next = when (controller.repeatMode) {
+                Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
+                Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
+                else -> Player.REPEAT_MODE_OFF
+            }
+            controller.repeatMode = next
+            _state.update { it.copy(repeatMode = next) }
         }
-        controller.repeatMode = next
-        _state.update { it.copy(repeatMode = next) }
     }
 
     fun restoreEqualizerState(
@@ -1104,18 +1191,20 @@ class PlaybackController internal constructor(
     }
 
     private fun applyCurrentDsp() {
-        val controller = mediaController as? MediaController ?: return
-        val s = _state.value
-        val args = Bundle().apply {
-            putBoolean(PulseMediaService.EXTRA_EQ_ENABLED, s.eqEnabled)
-            putIntArray(PulseMediaService.EXTRA_BANDS, s.bandLevels.toIntArray())
-            putInt(PulseMediaService.EXTRA_BASS, s.bassBoost)
-            putInt(PulseMediaService.EXTRA_REVERB, s.reverbPreset)
+        runOnPlayerThread {
+            val controller = mediaController as? MediaController ?: return@runOnPlayerThread
+            val s = _state.value
+            val args = Bundle().apply {
+                putBoolean(PulseMediaService.EXTRA_EQ_ENABLED, s.eqEnabled)
+                putIntArray(PulseMediaService.EXTRA_BANDS, s.bandLevels.toIntArray())
+                putInt(PulseMediaService.EXTRA_BASS, s.bassBoost)
+                putInt(PulseMediaService.EXTRA_REVERB, s.reverbPreset)
+            }
+            controller.sendCustomCommand(
+                SessionCommand(PulseMediaService.ACTION_APPLY_SOUNDSCAPE, Bundle.EMPTY),
+                args
+            )
         }
-        controller.sendCustomCommand(
-            SessionCommand(PulseMediaService.ACTION_APPLY_SOUNDSCAPE, Bundle.EMPTY),
-            args
-        )
     }
 
     fun updateTrackMetadata(updated: Track) {
@@ -1125,19 +1214,45 @@ class PlaybackController internal constructor(
                 queue = current.queue.map { if (it.id == updated.id) updated else it }
             )
         }
+        runOnPlayerThread {
+            val controller = mediaController ?: return@runOnPlayerThread
+            val count = controller.mediaItemCount
+            for (idx in 0 until count) {
+                val existing = controller.getMediaItemAt(idx)
+                if (existing.mediaId == updated.id) {
+                    val existingUri = existing.localConfiguration?.uri?.toString()
+                    val existingMime = existing.localConfiguration?.mimeType
+                    val replacement = updated.toMediaItemOrNull(
+                        overrideUri = existingUri,
+                        mimeType = existingMime
+                    ) ?: continue
+                    val prevTrack = PulseMediaItemMapper.fromMediaItem(existing)
+                    val displayChanged = existing.mediaMetadata.title?.toString() != replacement.mediaMetadata.title?.toString() ||
+                        existing.mediaMetadata.artist?.toString() != replacement.mediaMetadata.artist?.toString() ||
+                        existing.mediaMetadata.albumTitle?.toString() != replacement.mediaMetadata.albumTitle?.toString() ||
+                        existing.mediaMetadata.artworkUri != replacement.mediaMetadata.artworkUri ||
+                        prevTrack?.isLiked != updated.isLiked
+                    if (displayChanged) {
+                        controller.replaceMediaItem(idx, replacement)
+                    }
+                }
+            }
+        }
     }
 
     fun syncToRoomPlayback(track: Track, isPlaying: Boolean, targetPosMs: Long) {
-        val current = _state.value.currentTrack
-        if (current?.id != track.id) {
-            playTrack(track)
+        runOnPlayerThread {
+            val current = _state.value.currentTrack
+            if (current?.id != track.id) {
+                playTrack(track)
+            }
+            val controller = mediaController ?: return@runOnPlayerThread
+            if (kotlin.math.abs(controller.currentPosition - targetPosMs) > 2_500L) {
+                controller.seekTo(targetPosMs.coerceAtLeast(0L))
+            }
+            if (isPlaying && !controller.isPlaying) controller.play()
+            else if (!isPlaying && controller.isPlaying) controller.pause()
         }
-        val controller = mediaController ?: return
-        if (kotlin.math.abs(controller.currentPosition - targetPosMs) > 2_500L) {
-            controller.seekTo(targetPosMs.coerceAtLeast(0L))
-        }
-        if (isPlaying && !controller.isPlaying) controller.play()
-        else if (!isPlaying && controller.isPlaying) controller.pause()
     }
 
     private fun recordTrackSignal(completed: Boolean) {
@@ -1178,31 +1293,11 @@ class PlaybackController internal constructor(
     private fun Track.toMediaItemOrNull(
         overrideUri: String? = null,
         mimeType: String? = null
-    ): MediaItem? {
-        val uriString = overrideUri ?: playableUri
-        if (uriString.isBlank()) return null
-        val artUri = displayArtworkUri
-        val metadata = MediaMetadata.Builder()
-            .setTitle(title)
-            .setArtist(artist)
-            .setAlbumTitle(album)
-            .apply {
-                if (artUri.isNotBlank()) {
-                    setArtworkUri(Uri.parse(artUri))
-                }
-            }
-            .build()
-        return MediaItem.Builder()
-            .setMediaId(id)
-            .setUri(uriString)
-            .apply {
-                if (!mimeType.isNullOrBlank()) {
-                    setMimeType(mimeType)
-                }
-            }
-            .setMediaMetadata(metadata)
-            .build()
-    }
+    ): MediaItem? = PulseMediaItemMapper.toMediaItem(
+        track = this,
+        overrideUri = overrideUri,
+        mimeType = mimeType
+    )
 
     private fun playbackStateName(state: Int): String = when (state) {
         Player.STATE_IDLE -> "IDLE"
@@ -1266,6 +1361,8 @@ class PlaybackController internal constructor(
         sleepTimerJob?.cancel()
         AudioSpectrumBus.reset()
         _state.update { it.copy(isBuffering = false, isPlaying = false) }
-        controllerFuture?.let { MediaController.releaseFuture(it) }
+        runOnPlayerThread {
+            controllerFuture?.let { MediaController.releaseFuture(it) }
+        }
     }
 }

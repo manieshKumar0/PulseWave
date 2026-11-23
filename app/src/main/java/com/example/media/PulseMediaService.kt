@@ -1,5 +1,7 @@
 package com.example.media
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -7,6 +9,7 @@ import android.media.audiofx.BassBoost
 import android.media.audiofx.Equalizer
 import android.media.audiofx.PresetReverb
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -39,11 +42,13 @@ import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.exoplayer.upstream.Allocator
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
+import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
 import com.example.MainActivity
+import com.example.R
 import com.example.data.model.DefaultSoundscapes
 import com.example.data.model.Track
 import com.example.data.remote.ResolvedAudioStream
@@ -66,6 +71,8 @@ class PulseMediaService : MediaSessionService() {
     private var player: ExoPlayer? = null
     private var mediaSession: MediaSession? = null
     private var pulseMediaSourceFactory: PulseMediaSourceFactory? = null
+    private var bitmapLoader: CoilBitmapLoader? = null
+    private var resumptionStore: PulsePlaybackResumptionStore? = null
 
     private var equalizer: Equalizer? = null
     private var bassBoost: BassBoost? = null
@@ -78,16 +85,38 @@ class PulseMediaService : MediaSessionService() {
 
     companion object {
         const val ACTION_APPLY_SOUNDSCAPE = "com.example.pulsewave.APPLY_SOUNDSCAPE"
+        const val ACTION_OPEN_NOW_PLAYING = "com.example.pulsewave.OPEN_NOW_PLAYING"
+        const val EXTRA_OPEN_NOW_PLAYING = "open_now_playing"
         const val EXTRA_BANDS = "bands"
         const val EXTRA_BASS = "bass"
         const val EXTRA_REVERB = "reverb"
         const val EXTRA_EQ_ENABLED = "eq_enabled"
+        const val NOTIFICATION_CHANNEL_ID = "pulsewave_playback_channel"
+        const val NOTIFICATION_ID = 1001
         private const val TAG = "PulseMediaService"
     }
 
     @OptIn(UnstableApi::class)
     override fun onCreate() {
         super.onCreate()
+        ensurePlaybackNotificationChannel()
+        val notificationProvider = DefaultMediaNotificationProvider.Builder(this)
+            .setNotificationId(NOTIFICATION_ID)
+            .setChannelId(NOTIFICATION_CHANNEL_ID)
+            .setChannelName(R.string.notification_channel_playback_name)
+            .build()
+            .apply {
+                setSmallIcon(R.drawable.ic_music_notification)
+            }
+        setMediaNotificationProvider(notificationProvider)
+        setListener(object : Listener {
+            override fun onForegroundServiceStartNotAllowedException() {
+                Log.w(TAG, "Foreground service start not allowed while app is backgrounded")
+            }
+        })
+
+        resumptionStore = PulsePlaybackResumptionStore(applicationContext)
+
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
@@ -186,6 +215,8 @@ class PulseMediaService : MediaSessionService() {
             .setLoadControl(loadControl)
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
+            .setWakeMode(C.WAKE_MODE_NETWORK)
+            .setMaxSeekToPreviousPositionMs(4_000L)
             .build()
 
         exoPlayer.addListener(object : Player.Listener {
@@ -195,6 +226,23 @@ class PulseMediaService : MediaSessionService() {
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 AudioSpectrumBus.setPlaybackActive(isPlaying)
+                persistPlaybackSnapshot(exoPlayer)
+            }
+
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                persistPlaybackSnapshot(exoPlayer)
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_READY || playbackState == Player.STATE_ENDED) {
+                    persistPlaybackSnapshot(exoPlayer)
+                }
+            }
+
+            override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+                if (reason == Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED) {
+                    persistPlaybackSnapshot(exoPlayer)
+                }
             }
         })
 
@@ -203,7 +251,11 @@ class PulseMediaService : MediaSessionService() {
             attachAudioEffects(exoPlayer.audioSessionId)
         }
 
-        val launchIntent = Intent(this, MainActivity::class.java)
+        val launchIntent = Intent(this, MainActivity::class.java).apply {
+            action = ACTION_OPEN_NOW_PLAYING
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(EXTRA_OPEN_NOW_PLAYING, true)
+        }
         val pendingIntent = PendingIntent.getActivity(
             this,
             0,
@@ -211,19 +263,23 @@ class PulseMediaService : MediaSessionService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
+        val sessionBitmapLoader = CoilBitmapLoader(this).also { bitmapLoader = it }
+
         mediaSession = MediaSession.Builder(this, exoPlayer)
             .setSessionActivity(pendingIntent)
+            .setBitmapLoader(sessionBitmapLoader)
             .setCallback(object : MediaSession.Callback {
                 override fun onConnect(
                     session: MediaSession,
                     controller: MediaSession.ControllerInfo
                 ): MediaSession.ConnectionResult {
-                    val sessionCommands = MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS
+                    val sessionCommandsBuilder = MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS
                         .buildUpon()
                         .add(SessionCommand(ACTION_APPLY_SOUNDSCAPE, Bundle.EMPTY))
-                        .build()
+                    val playerCommands = MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS
                     return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
-                        .setAvailableSessionCommands(sessionCommands)
+                        .setAvailablePlayerCommands(playerCommands)
+                        .setAvailableSessionCommands(sessionCommandsBuilder.build())
                         .build()
                 }
 
@@ -247,8 +303,49 @@ class PulseMediaService : MediaSessionService() {
                     }
                     return super.onCustomCommand(session, controller, customCommand, args)
                 }
+
+                @OptIn(UnstableApi::class)
+                override fun onPlaybackResumption(
+                    mediaSession: MediaSession,
+                    controller: MediaSession.ControllerInfo
+                ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+                    val snapshot = resumptionStore?.loadSnapshot(isForPlayback = true)
+                    return if (snapshot != null) {
+                        Futures.immediateFuture(snapshot)
+                    } else {
+                        Futures.immediateFailedFuture(IllegalStateException("No previous PulseWave playback state"))
+                    }
+                }
             })
             .build()
+    }
+
+    private fun ensurePlaybackNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val nm = getSystemService(NotificationManager::class.java) ?: return
+        val existing = nm.getNotificationChannel(NOTIFICATION_CHANNEL_ID)
+        if (existing != null) return
+        val channel = NotificationChannel(
+            NOTIFICATION_CHANNEL_ID,
+            getString(R.string.notification_channel_playback_name),
+            NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = getString(R.string.notification_channel_playback_description)
+            setShowBadge(false)
+            lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+        }
+        nm.createNotificationChannel(channel)
+    }
+
+    private fun persistPlaybackSnapshot(exoPlayer: ExoPlayer) {
+        val count = exoPlayer.mediaItemCount
+        if (count <= 0) return
+        val items = (0 until count).map { exoPlayer.getMediaItemAt(it) }
+        resumptionStore?.saveSnapshot(
+            items = items,
+            currentIndex = exoPlayer.currentMediaItemIndex,
+            positionMs = exoPlayer.currentPosition.coerceAtLeast(0L)
+        )
     }
 
     private fun attachAudioEffects(audioSessionId: Int) {
@@ -313,16 +410,21 @@ class PulseMediaService : MediaSessionService() {
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession
 
+    @OptIn(UnstableApi::class)
     override fun onTaskRemoved(rootIntent: Intent?) {
+        player?.let { persistPlaybackSnapshot(it) }
         val p = mediaSession?.player
-        if (p == null || !p.playWhenReady || p.mediaItemCount == 0) {
-            stopSelf()
+        if (!isPlaybackOngoing || p == null || !p.playWhenReady || p.mediaItemCount == 0) {
+            pauseAllPlayersAndStopSelf()
         }
     }
 
     @OptIn(UnstableApi::class)
     override fun onDestroy() {
+        player?.let { persistPlaybackSnapshot(it) }
         AudioSpectrumBus.reset()
+        bitmapLoader?.release()
+        bitmapLoader = null
         pulseMediaSourceFactory?.release()
         pulseMediaSourceFactory = null
         releaseEffects()

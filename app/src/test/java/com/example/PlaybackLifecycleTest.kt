@@ -22,7 +22,9 @@ import com.example.data.remote.SessionAwareNewPipeDownloader
 import com.example.data.remote.YouTubeMusicClient
 import com.example.data.remote.YouTubeSessionManager
 import com.example.media.PlaybackController
+import com.example.media.PulseMediaItemMapper
 import com.example.media.PulseMediaSourceFactory
+import com.example.media.PulsePlaybackResumptionStore
 import com.example.media.ResolvingYouTubeMediaSource
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -713,6 +715,127 @@ class PlaybackLifecycleTest {
         uncachedFactory.release()
     }
 
+    @Test
+    fun mediaSessionSupport_resumptionStoreSyncAndMetadataPropagationWork() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val ytTrack = Track(
+            id = "yt_NJAv_7lHUIU",
+            title = "Kesariya",
+            artist = "Arijit Singh",
+            album = "Brahmastra",
+            genre = "Bollywood",
+            mood = "Romantic",
+            bpm = 96,
+            durationMs = 268_000L,
+            artworkUrl = "https://i.ytimg.com/vi/NJAv_7lHUIU/hqdefault.jpg",
+            sourceType = TrackSourceType.YOUTUBE,
+            isLiked = true
+        )
+        val localTrack = Track(
+            id = "device_ms_7",
+            title = "Night Drive",
+            artist = "Synth Lab",
+            album = "After Hours",
+            genre = "Synthwave",
+            durationMs = 210_000L,
+            localUri = "content://media/external/audio/media/7",
+            sourceType = TrackSourceType.LOCAL_SAF
+        )
+
+        // 1. PulseMediaItemMapper preserves Track fields + rich MediaMetadata
+        val ytItem = PulseMediaItemMapper.toMediaItem(
+            track = ytTrack,
+            overrideUri = "https://rr1---sn.googlevideo.com/temp-expired-url"
+        )!!
+        assertEquals("Kesariya", ytItem.mediaMetadata.title.toString())
+        assertEquals("Arijit Singh", ytItem.mediaMetadata.artist.toString())
+        assertEquals("Brahmastra", ytItem.mediaMetadata.albumTitle.toString())
+        assertEquals(268_000L, ytItem.mediaMetadata.durationMs)
+        val restoredYt = PulseMediaItemMapper.fromMediaItem(ytItem)!!
+        assertEquals(ytTrack.id, restoredYt.id)
+        assertEquals(ytTrack.artist, restoredYt.artist)
+        assertEquals(ytTrack.genre, restoredYt.genre)
+        assertEquals(TrackSourceType.YOUTUBE, restoredYt.sourceType)
+        assertTrue(restoredYt.isLiked)
+
+        val localItem = PulseMediaItemMapper.toMediaItem(localTrack)!!
+
+        // 2. PulsePlaybackResumptionStore stores durable pulseyt:// URI (not temporary CDN URL) and restores position
+        val store = PulsePlaybackResumptionStore(context)
+        store.clear()
+        store.saveSnapshot(
+            items = listOf(ytItem, localItem),
+            currentIndex = 0,
+            positionMs = 45_200L
+        )
+        val resumedForUi = store.loadSnapshot(isForPlayback = false)
+        assertNotNull(resumedForUi)
+        assertEquals(2, resumedForUi!!.mediaItems.size)
+        assertEquals(0, resumedForUi.startIndex)
+        assertEquals(45_200L, resumedForUi.startPositionMs)
+        assertEquals(
+            "YouTube item in resumption store must use durable pulseyt:// scheme",
+            "pulseyt://watch?v=NJAv_7lHUIU",
+            resumedForUi.mediaItems[0].localConfiguration?.uri.toString()
+        )
+        assertEquals(
+            localTrack.playableUri,
+            resumedForUi.mediaItems[1].localConfiguration?.uri.toString()
+        )
+
+        // 3. Reconnecting PlaybackController hydrates active track, queue, playing state, and position from running Player
+        val fakePlayer = FakeMediaPlayer()
+        fakePlayer.player.setMediaItems(listOf(ytItem, localItem), 1, 0L)
+        fakePlayer.positionMs = 19_000L
+        fakePlayer.durationMs = 210_000L
+        fakePlayer.player.prepare()
+        fakePlayer.player.play()
+
+        val reconnected = PlaybackController(
+            context = context,
+            signalDao = NoOpSignalDao(),
+            injectedPlayer = fakePlayer.player,
+            autoConnectController = false
+        )
+        assertEquals(localTrack.id, reconnected.state.value.currentTrack?.id)
+        assertEquals(2, reconnected.state.value.queue.size)
+        assertEquals(1, reconnected.state.value.currentIndex)
+        assertTrue(reconnected.state.value.isPlaying)
+        assertEquals(19_000L, reconnected.state.value.positionMs)
+
+        // 4. updateTrackMetadata propagates updated title/artist/artwork into the live MediaItem on the Player
+        //    even when called from a background IO worker thread (MediaController requires Main Looper)
+        fakePlayer.enforceMainThread = true
+        val bgUpdated = localTrack.copy(title = "Night Drive (Remastered)")
+        runBlocking {
+            val workerJob = async(Dispatchers.IO) {
+                reconnected.updateTrackMetadata(bgUpdated)
+            }
+            workerJob.await()
+        }
+        val flushDeadline = System.currentTimeMillis() + 3_000L
+        while (fakePlayer.items[1].mediaMetadata.title.toString() != "Night Drive (Remastered)" &&
+            System.currentTimeMillis() < flushDeadline
+        ) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(10)
+        }
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals("Night Drive (Remastered)", reconnected.state.value.currentTrack?.title)
+        assertEquals(
+            "Night Drive (Remastered)",
+            fakePlayer.items[1].mediaMetadata.title.toString()
+        )
+        assertEquals(
+            localTrack.playableUri,
+            fakePlayer.items[1].localConfiguration?.uri.toString()
+        )
+
+        store.clear()
+        reconnected.release()
+    }
+
     private fun fakeStream(url: String): ResolvedAudioStream = ResolvedAudioStream(
         url = url,
         mimeType = "audio/mp4",
@@ -738,11 +861,15 @@ class PlaybackLifecycleTest {
         var currentIndex: Int = 0
         var positionMs: Long = 0L
         var durationMs: Long = 0L
+        var enforceMainThread: Boolean = false
 
         val player: Player = Proxy.newProxyInstance(
             Player::class.java.classLoader,
             arrayOf(Player::class.java)
         ) { _, method, args ->
+            if (enforceMainThread && Looper.myLooper() != Looper.getMainLooper()) {
+                throw IllegalStateException("MediaController method ${method.name} is called from a wrong thread")
+            }
             when (method.name) {
                 "addListener" -> {
                     (args?.getOrNull(0) as? Player.Listener)?.let { listeners.add(it) }

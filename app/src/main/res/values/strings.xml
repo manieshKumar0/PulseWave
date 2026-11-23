@@ -8,4 +8,6 @@
     <string name="device_permission_cta">Allow Audio Access</string>
     <string name="device_empty_title">No songs longer than 2 minutes found</string>
     <string name="device_empty_body">MP3 and audio tracks longer than 2 minutes stored on your phone will appear here automatically.</string>
+    <string name="notification_channel_playback_name">Playback Controls</string>
+    <string name="notification_channel_playback_description">Media playback controls and lock-screen player</string>
 </resources>
