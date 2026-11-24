@@ -4,6 +4,12 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,7 +28,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.Logout
+import androidx.compose.material.icons.automirrored.rounded.VolumeDown
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Bedtime
 import androidx.compose.material.icons.rounded.Close
@@ -49,9 +57,11 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -75,6 +85,7 @@ import com.example.ui.components.EqualizerControlPanel
 import com.example.ui.components.GoogleGLogo
 import com.example.ui.components.ObsidianGlassCard
 import com.example.ui.components.PulseScreenHeader
+import com.example.ui.components.VisualizerStyle
 import com.example.ui.theme.MintElectric
 import com.example.ui.theme.ThemeMode
 import com.example.ui.theme.UltravioletPulse
@@ -102,6 +113,7 @@ fun SettingsScreen(
     onToggleOfflineMode: (Boolean) -> Unit,
     onToggleHighResStreaming: (Boolean) -> Unit,
     onCrossfadeSecondsChange: (Int) -> Unit,
+    onToggleSmartFadeOut: (Boolean) -> Unit = {},
     onToggleEqEnabled: (Boolean) -> Unit,
     onSelectEqPreset: (SoundscapePreset) -> Unit,
     onUpdateEqBand: (Int, Int) -> Unit,
@@ -113,6 +125,7 @@ fun SettingsScreen(
     onCancelSleepTimer: () -> Unit,
     onSelectThemeMode: (ThemeMode) -> Unit,
     onToggleDynamicGlow: (Boolean) -> Unit,
+    onOpenVisualizerSettings: () -> Unit = {},
     onImportSafAudio: (List<Uri>, Boolean) -> Unit,
     onSyncLocalLyrics: () -> Unit = {},
     onClearMetadataCache: () -> Unit = {},
@@ -408,12 +421,27 @@ fun SettingsScreen(
                         color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
                     )
 
-                    var crossfadeSliderValue by remember(settings.crossfadeSeconds) {
-                        mutableFloatStateOf(settings.crossfadeSeconds.toFloat())
+                    var preferredNonZeroCrossfade by remember {
+                        mutableIntStateOf(settings.crossfadeSeconds.takeIf { it > 0 } ?: 4)
                     }
-                    val displaySeconds = crossfadeSliderValue.roundToInt().coerceIn(0, 12)
+                    if (settings.crossfadeSeconds > 0) {
+                        preferredNonZeroCrossfade = settings.crossfadeSeconds.coerceIn(1, 12)
+                    }
+                    val isCrossfadeEnabled = settings.crossfadeSeconds > 0
+                    var crossfadeSliderValue by remember(settings.crossfadeSeconds) {
+                        mutableFloatStateOf(
+                            (settings.crossfadeSeconds.takeIf { it > 0 } ?: preferredNonZeroCrossfade)
+                                .coerceIn(1, 12)
+                                .toFloat()
+                        )
+                    }
+                    val displaySeconds = if (isCrossfadeEnabled) {
+                        crossfadeSliderValue.roundToInt().coerceIn(1, 12)
+                    } else {
+                        0
+                    }
 
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -427,12 +455,12 @@ fun SettingsScreen(
                                 Icon(
                                     imageVector = Icons.Rounded.GraphicEq,
                                     contentDescription = null,
-                                    tint = if (displaySeconds > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                    tint = if (isCrossfadeEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                                 Column {
-                                    Text("Crossfade Duration", style = MaterialTheme.typography.titleMedium)
+                                    Text("Crossfade Transitions", style = MaterialTheme.typography.titleMedium)
                                     Text(
-                                        text = if (displaySeconds == 0) {
+                                        text = if (!isCrossfadeEnabled) {
                                             "Gapless track transitions without overlap"
                                         } else {
                                             "Smooth ${displaySeconds}s fade between consecutive songs"
@@ -443,58 +471,128 @@ fun SettingsScreen(
                                 }
                             }
 
-                            Surface(
-                                shape = RoundedCornerShape(10.dp),
-                                color = if (displaySeconds > 0) {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.surfaceVariant
-                                }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                Text(
-                                    text = if (displaySeconds == 0) "Off" else "${displaySeconds}s",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (displaySeconds > 0) {
-                                        MaterialTheme.colorScheme.onPrimaryContainer
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (isCrossfadeEnabled) {
+                                        MaterialTheme.colorScheme.primaryContainer
                                     } else {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                        MaterialTheme.colorScheme.surfaceVariant
+                                    }
+                                ) {
+                                    Text(
+                                        text = if (isCrossfadeEnabled) "${displaySeconds}s" else "Off",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isCrossfadeEnabled) {
+                                            MaterialTheme.colorScheme.onPrimaryContainer
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
+                                        modifier = Modifier
+                                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                                            .testTag("crossfade_duration_value")
+                                    )
+                                }
+                                Switch(
+                                    checked = isCrossfadeEnabled,
+                                    onCheckedChange = { enabled ->
+                                        if (enabled) {
+                                            val restore = preferredNonZeroCrossfade.coerceIn(1, 12)
+                                            crossfadeSliderValue = restore.toFloat()
+                                            onCrossfadeSecondsChange(restore)
+                                        } else {
+                                            onCrossfadeSecondsChange(0)
+                                        }
                                     },
-                                    modifier = Modifier
-                                        .padding(horizontal = 10.dp, vertical = 4.dp)
-                                        .testTag("crossfade_duration_value")
+                                    modifier = Modifier.testTag("crossfade_toggle_switch")
                                 )
                             }
                         }
 
-                        Slider(
-                            value = crossfadeSliderValue,
-                            onValueChange = { crossfadeSliderValue = it },
-                            onValueChangeFinished = {
-                                onCrossfadeSecondsChange(crossfadeSliderValue.roundToInt().coerceIn(0, 12))
-                            },
-                            valueRange = 0f..12f,
-                            steps = 11,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .semantics {
-                                    contentDescription = "Crossfade duration, currently $displaySeconds seconds"
-                                }
-                                .testTag("crossfade_duration_slider")
-                        )
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
+                        AnimatedVisibility(
+                            visible = isCrossfadeEnabled,
+                            enter = fadeIn() + expandVertically(),
+                            exit = fadeOut() + shrinkVertically()
                         ) {
-                            listOf("Off", "4s", "8s", "12s").forEach { tick ->
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Slider(
+                                    value = crossfadeSliderValue,
+                                    onValueChange = { next ->
+                                        crossfadeSliderValue = next
+                                        preferredNonZeroCrossfade = next.roundToInt().coerceIn(1, 12)
+                                    },
+                                    onValueChangeFinished = {
+                                        val chosen = crossfadeSliderValue.roundToInt().coerceIn(1, 12)
+                                        preferredNonZeroCrossfade = chosen
+                                        onCrossfadeSecondsChange(chosen)
+                                    },
+                                    valueRange = 1f..12f,
+                                    steps = 10,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .semantics {
+                                            contentDescription = "Crossfade duration, currently $displaySeconds seconds"
+                                        }
+                                        .testTag("crossfade_duration_slider")
+                                )
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    listOf("1s", "4s", "8s", "12s").forEach { tick ->
+                                        Text(
+                                            text = tick,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.VolumeDown,
+                                contentDescription = null,
+                                tint = if (settings.smartFadeOutEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Column {
+                                Text("Smart Fade-Out", style = MaterialTheme.typography.titleMedium)
                                 Text(
-                                    text = tick,
-                                    style = MaterialTheme.typography.labelSmall,
+                                    text = if (settings.smartFadeOutEnabled) {
+                                        "Smoothly tapers audio down when pausing manually"
+                                    } else {
+                                        "Instant pause without volume fade-out"
+                                    },
+                                    style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                         }
+                        Switch(
+                            checked = settings.smartFadeOutEnabled,
+                            onCheckedChange = onToggleSmartFadeOut,
+                            modifier = Modifier.testTag("smart_fade_out_switch")
+                        )
                     }
                 }
             }
@@ -775,6 +873,63 @@ fun SettingsScreen(
                             onCheckedChange = onToggleDynamicGlow,
                             modifier = Modifier.testTag("dynamic_glow_switch")
                         )
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.16f))
+
+                    val activeVisualizer = VisualizerStyle.fromIndex(settings.visualizerStyleIndex)
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.34f),
+                        border = BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.24f)
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable(onClick = onOpenVisualizerSettings)
+                            .minimumInteractiveComponentSize()
+                            .testTag("open_visualizer_settings_button")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.GraphicEq,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Column {
+                                    Text(
+                                        text = "Visualizer Studio",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = "${activeVisualizer.number}/3 · ${activeVisualizer.title} · Preview & controls",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                                contentDescription = "Open Visualizer Studio",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
             }

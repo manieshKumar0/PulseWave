@@ -64,6 +64,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -73,6 +74,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.ui.Alignment
@@ -94,7 +96,6 @@ import com.example.data.model.DefaultSoundscapes
 import com.example.data.model.LyricLine
 import com.example.data.model.LyricNoteDoc
 import com.example.data.model.PulseRoomDoc
-import com.example.data.model.SonicDnaProfile
 import com.example.data.model.SoundscapePreset
 import com.example.data.model.Track
 import com.example.data.model.UserProfile
@@ -103,12 +104,14 @@ import com.example.media.PlaybackUiState
 import com.example.ui.components.BeatReactiveLyricState
 import com.example.ui.components.BeatReactiveWaveformCanvas
 import com.example.ui.components.CreatePulseRoomDialog
+import com.example.ui.components.NeonSkylineBackgroundOverlay
 import com.example.ui.components.ObsidianGlassCard
 import com.example.ui.components.PulseRoomStatusBadge
 import com.example.ui.components.PulseWaveBrandLogo
-import com.example.ui.components.SonicDnaRadarChart
 import com.example.ui.components.SyncedLyricsDisplay
 import com.example.ui.components.TrackArtworkThumb
+import com.example.ui.components.VisualizerRenderConfig
+import com.example.ui.components.VisualizerStyle
 import com.example.ui.components.dynamicAmbientGlow
 import com.example.ui.components.formatMillis
 import com.example.ui.theme.CoralWave
@@ -125,9 +128,15 @@ fun NowPlayingScreen(
     isLoadingLyrics: Boolean = false,
     aiTrackStory: UiState<String>?,
     lyricNotes: List<LyricNoteDoc>,
-    sonicDna: SonicDnaProfile,
     albumAccent: Color?,
+    dynamicGlowEnabled: Boolean = true,
     downloadProgress: Float?,
+    visualizerStyleIndex: Int = 2,
+    visualizerHeightDp: Int = 0,
+    visualizerVerticalPaddingDp: Int = 4,
+    visualizerHorizontalPaddingDp: Int = 0,
+    visualizerParticleMotionScale: Float = 1.0f,
+    visualizerIntensityScale: Float = 1.0f,
     activePulseRoom: PulseRoomDoc? = null,
     currentUserId: String = "",
     isSignedIn: Boolean = true,
@@ -161,17 +170,58 @@ fun NowPlayingScreen(
 
     val track = playbackState.currentTrack ?: return
     val glowPrimary = albumAccent ?: MaterialTheme.colorScheme.primary
+    val visualizerStyle = VisualizerStyle.fromIndex(visualizerStyleIndex)
+    val visualizerConfig = remember(
+        visualizerStyle,
+        visualizerHeightDp,
+        visualizerVerticalPaddingDp,
+        visualizerHorizontalPaddingDp
+    ) {
+        VisualizerRenderConfig(
+            height = if (visualizerHeightDp > 0) visualizerHeightDp.dp else visualizerStyle.preferredHeightDp,
+            horizontalPadding = visualizerHorizontalPaddingDp.dp,
+            verticalPadding = visualizerVerticalPaddingDp.dp
+        )
+    }
     var selectedStudioTab by remember { mutableIntStateOf(0) }
     var showCreateRoomDialog by remember { mutableStateOf(false) }
-    val studioTabs = listOf("Player", "Lyrics", "Soundscape", "DNA")
+    val studioTabs = listOf("Player", "Lyrics", "Soundscape")
 
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            .dynamicAmbientGlow(glowPrimary, UltravioletPulse, intensity = 0.42f)
-            .safeDrawingPadding()
+            .then(
+                if (dynamicGlowEnabled) {
+                    Modifier.dynamicAmbientGlow(glowPrimary, UltravioletPulse, intensity = 0.42f)
+                } else {
+                    Modifier
+                }
+            )
     ) {
+        if (visualizerStyle == VisualizerStyle.NEON_SKYLINE && selectedStudioTab == 0) {
+            NeonSkylineBackgroundOverlay(
+                energy = playbackState.beatPulseEnergy,
+                isPlaying = playbackState.isPlaying,
+                positionMs = playbackState.positionMs,
+                bpm = track.bpm,
+                primaryColor = glowPrimary,
+                secondaryColor = UltravioletPulse,
+                dynamicGlowEnabled = dynamicGlowEnabled,
+                config = visualizerConfig,
+                particleMotionScale = visualizerParticleMotionScale,
+                skylineIntensityScale = visualizerIntensityScale,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("neon_skyline_background_visualizer")
+            )
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .safeDrawingPadding()
+        ) {
         // Header bar
         Box(
             modifier = Modifier
@@ -286,6 +336,10 @@ fun NowPlayingScreen(
                 track = track,
                 playbackState = playbackState,
                 glowPrimary = glowPrimary,
+                visualizerStyle = visualizerStyle,
+                visualizerConfig = visualizerConfig,
+                visualizerParticleMotionScale = visualizerParticleMotionScale,
+                visualizerIntensityScale = visualizerIntensityScale,
                 downloadProgress = downloadProgress,
                 onTogglePlayPause = onTogglePlayPause,
                 onSeekTo = onSeekTo,
@@ -306,6 +360,10 @@ fun NowPlayingScreen(
                 aiTrackStory = aiTrackStory,
                 lyricNotes = lyricNotes,
                 glowPrimary = glowPrimary,
+                dynamicGlowEnabled = dynamicGlowEnabled,
+                visualizerStyle = visualizerStyle,
+                visualizerParticleMotionScale = visualizerParticleMotionScale,
+                visualizerIntensityScale = visualizerIntensityScale,
                 isSignedIn = isSignedIn,
                 onRequestSignIn = onRequestSignIn,
                 onSeekTo = onSeekTo,
@@ -315,7 +373,7 @@ fun NowPlayingScreen(
                 onGenerateAiStory = { onGenerateAiStory(track) },
                 onAddLyricNote = { note -> onAddLyricNote(track, playbackState.positionMs, note) }
             )
-            2 -> SoundscapeLabTab(
+            else -> SoundscapeLabTab(
                 playbackState = playbackState,
                 onApplyPreset = onApplyPreset,
                 onMorphSoundscape = onMorphSoundscape,
@@ -323,33 +381,8 @@ fun NowPlayingScreen(
                 onUpdateBassBoost = onUpdateBassBoost,
                 onUpdateReverbPreset = onUpdateReverbPreset
             )
-            3 -> Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .padding(18.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                ObsidianGlassCard(modifier = Modifier.fillMaxWidth(), cornerRadius = 22.dp) {
-                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Acoustic Telemetry", style = MaterialTheme.typography.titleLarge)
-                        Text("Genre: ${track.genre} · Mood: ${track.mood}", style = MaterialTheme.typography.bodyLarge)
-                        Text("Tempo: ${track.bpm} BPM · Album: ${track.album}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-                ObsidianGlassCard(modifier = Modifier.fillMaxWidth(), cornerRadius = 22.dp) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Text("Your Sonic DNA Profile", style = MaterialTheme.typography.titleLarge)
-                        SonicDnaRadarChart(primaryProfile = sonicDna)
-                    }
-                }
-            }
         }
+    }
     }
 
     if (showCreateRoomDialog) {
@@ -370,6 +403,10 @@ private fun PlayerTab(
     track: Track,
     playbackState: PlaybackUiState,
     glowPrimary: Color,
+    visualizerStyle: VisualizerStyle,
+    visualizerConfig: VisualizerRenderConfig,
+    visualizerParticleMotionScale: Float,
+    visualizerIntensityScale: Float,
     downloadProgress: Float?,
     onTogglePlayPause: () -> Unit,
     onSeekTo: (Long) -> Unit,
@@ -382,33 +419,48 @@ private fun PlayerTab(
     onConnectYouTube: () -> Unit,
     onRetryPlayback: () -> Unit
 ) {
+    val targetHeight = visualizerConfig.height ?: visualizerStyle.preferredHeightDp
+    val visualizerHeight by animateDpAsState(
+        targetValue = targetHeight,
+        animationSpec = spring(stiffness = 380f),
+        label = "now_playing_visualizer_height"
+    )
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 22.dp, vertical = 14.dp),
+            .padding(horizontal = 22.dp, vertical = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         TrackArtworkThumb(
             artworkUrl = track.displayArtworkUri,
             title = track.title,
             modifier = Modifier
                 .fillMaxWidth(0.84f)
-                .height(270.dp),
+                .height(254.dp),
             cornerRadius = 28.dp
         )
 
-        BeatReactiveWaveformCanvas(
-            energy = playbackState.beatPulseEnergy,
-            isPlaying = playbackState.isPlaying,
-            primaryColor = glowPrimary,
-            secondaryColor = UltravioletPulse,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(52.dp)
-                .testTag("now_playing_visualizer")
-        )
+        if (visualizerStyle != VisualizerStyle.NEON_SKYLINE) {
+            BeatReactiveWaveformCanvas(
+                energy = playbackState.beatPulseEnergy,
+                isPlaying = playbackState.isPlaying,
+                primaryColor = glowPrimary,
+                secondaryColor = UltravioletPulse,
+                positionMs = playbackState.positionMs,
+                bpm = track.bpm,
+                style = visualizerStyle,
+                config = visualizerConfig,
+                particleMotionScale = visualizerParticleMotionScale,
+                skylineIntensityScale = visualizerIntensityScale,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(visualizerHeight)
+                    .testTag("now_playing_visualizer")
+            )
+        }
 
         Column(
             modifier = Modifier.fillMaxWidth(),
@@ -662,6 +714,10 @@ private fun LyricCanvasTab(
     aiTrackStory: UiState<String>?,
     lyricNotes: List<LyricNoteDoc>,
     glowPrimary: Color,
+    dynamicGlowEnabled: Boolean,
+    visualizerStyle: VisualizerStyle,
+    visualizerParticleMotionScale: Float,
+    visualizerIntensityScale: Float,
     isSignedIn: Boolean,
     onRequestSignIn: (String) -> Unit,
     onSeekTo: (Long) -> Unit,
@@ -709,6 +765,12 @@ private fun LyricCanvasTab(
             isPlaying = playbackState.isPlaying,
             primaryColor = glowPrimary,
             secondaryColor = UltravioletPulse,
+            positionMs = playbackState.positionMs,
+            bpm = track.bpm,
+            dynamicGlowEnabled = dynamicGlowEnabled,
+            style = visualizerStyle,
+            particleMotionScale = visualizerParticleMotionScale,
+            skylineIntensityScale = visualizerIntensityScale,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(42.dp)

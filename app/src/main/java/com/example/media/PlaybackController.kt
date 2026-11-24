@@ -43,6 +43,8 @@ import java.net.UnknownHostException
 import java.util.Calendar
 import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLException
+import kotlin.math.asin
+import kotlin.math.cos
 import kotlin.math.sin
 
 data class PlaybackUiState(
@@ -63,6 +65,7 @@ data class PlaybackUiState(
     val beatPulseEnergy: Float = 0.25f,
     val beatPhase: Float = 0f,
     val crossfadeSeconds: Int = 4,
+    val smartFadeOutEnabled: Boolean = true,
     val sleepTimerRemainingMs: Long? = null,
     val sleepTimerTotalMs: Long? = null,
     val playbackError: String? = null
@@ -109,6 +112,10 @@ class PlaybackController internal constructor(
     private var replayCounts = mutableMapOf<String, Int>()
     private var fadeInStartedAtMs: Long = 0L
     private var fadeInDurationMs: Long = 0L
+    private var pauseFadeJob: Job? = null
+    @Volatile
+    private var isFadingOutToPause: Boolean = false
+    private var pauseRequestedBySmartFade: Boolean = false
     private var sleepTimerEndRealtimeMs: Long? = null
     private val playbackAttemptSeq = AtomicLong(0L)
     private val playRequestGeneration = AtomicLong(0L)
@@ -116,6 +123,11 @@ class PlaybackController internal constructor(
     private var activeCorrelationId: String = "pb-0"
     @Volatile
     private var hasHandedUriForCurrentAttempt: Boolean = false
+
+    private companion object {
+        const val SMART_PAUSE_FADE_OUT_MS = 460L
+        const val SMART_RESUME_FADE_IN_MS = 220L
+    }
 
     internal fun cancelActiveResolutionForTest() {
         resolvePlayJob?.cancel(CancellationException("Playback cancelled"))
@@ -217,8 +229,12 @@ class PlaybackController internal constructor(
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 if (!isPlaying) {
                     AudioSpectrumBus.setPlaybackActive(false)
+                    if (isFadingOutToPause && !pauseRequestedBySmartFade) {
+                        cancelPauseFadeOut(restoreVolume = true)
+                    }
+                    pauseRequestedBySmartFade = false
                 }
-                _state.update { it.copy(isPlaying = isPlaying) }
+                _state.update { it.copy(isPlaying = isPlaying && !isFadingOutToPause) }
                 val activeTrack = _state.value.currentTrack
                 if (activeTrack != null && !activeTrack.isDownloaded && activeTrack.youtubeVideoId != null) {
                     Log.d(
@@ -568,7 +584,9 @@ class PlaybackController internal constructor(
                 val controller = mediaController
                 val hasError = _state.value.playbackError != null
                 val resolving = resolvePlayJob?.isActive == true
-                val playing = !hasError && !resolving && controller?.isPlaying == true
+                val fadingOut = isFadingOutToPause
+                val rawPlaying = !hasError && !resolving && controller?.isPlaying == true
+                val playing = rawPlaying && !fadingOut
                 if (controller != null && !hasError && !resolving) {
                     val pos = controller.currentPosition.coerceAtLeast(0L)
                     if (pos > maxPositionReachedMs) maxPositionReachedMs = pos
@@ -598,7 +616,9 @@ class PlaybackController internal constructor(
                         fallbackEnergy to fallbackPhase
                     }
 
-                    applyCrossfadeEnvelope(controller, playing, pos, dur)
+                    if (!fadingOut) {
+                        applyCrossfadeEnvelope(controller, playing, pos, dur)
+                    }
 
                     _state.update {
                         it.copy(
@@ -621,7 +641,12 @@ class PlaybackController internal constructor(
                         } else it
                     }
                 }
-                delay(if (playing) 50L else 180L)
+                val stepDelay = when {
+                    playing && fadeInDurationMs > 0L -> 20L
+                    playing -> 50L
+                    else -> 180L
+                }
+                delay(stepDelay)
             }
         }
     }
@@ -630,11 +655,24 @@ class PlaybackController internal constructor(
         val crossfadeMs = _state.value.crossfadeSeconds * 1000L
         if (crossfadeMs > 0L) {
             fadeInDurationMs = (crossfadeMs / 2L).coerceIn(400L, 6000L)
-            fadeInStartedAtMs = System.currentTimeMillis()
+            fadeInStartedAtMs = SystemClock.elapsedRealtime()
             controller?.volume = 0.04f
         } else {
             fadeInDurationMs = 0L
             controller?.volume = 1f
+        }
+    }
+
+    private fun triggerResumeFadeIn(controller: Player) {
+        val currentVol = controller.volume
+        if (currentVol in 0.05f..0.95f) {
+            val resumeFraction = (asin(currentVol.toDouble().coerceIn(0.05, 0.98)) / (Math.PI / 2.0)).toFloat()
+            fadeInDurationMs = SMART_RESUME_FADE_IN_MS
+            fadeInStartedAtMs = SystemClock.elapsedRealtime() - (resumeFraction * SMART_RESUME_FADE_IN_MS).toLong()
+        } else {
+            fadeInDurationMs = SMART_RESUME_FADE_IN_MS
+            fadeInStartedAtMs = SystemClock.elapsedRealtime()
+            controller.volume = 0.08f
         }
     }
 
@@ -644,6 +682,8 @@ class PlaybackController internal constructor(
         positionMs: Long,
         durationMs: Long
     ) {
+        if (isFadingOutToPause) return
+
         val sleepRemainingMs = sleepTimerEndRealtimeMs?.let { (it - SystemClock.elapsedRealtime()).coerceAtLeast(0L) }
         val sleepFadeFactor = if (playing && sleepRemainingMs != null && sleepRemainingMs <= 3_000L) {
             (sleepRemainingMs.toFloat() / 3_000f).coerceIn(0.06f, 1f)
@@ -651,17 +691,15 @@ class PlaybackController internal constructor(
             1f
         }
 
-        val crossfadeTotalMs = _state.value.crossfadeSeconds * 1000L
-        if (crossfadeTotalMs <= 0L || !playing) {
-            val nonCrossfadeVolume = if (playing) sleepFadeFactor else 1f
-            if (kotlin.math.abs(controller.volume - nonCrossfadeVolume) > 0.01f) {
-                controller.volume = nonCrossfadeVolume
+        if (!playing) {
+            if (kotlin.math.abs(controller.volume - 1f) > 0.01f) {
+                controller.volume = 1f
             }
             return
         }
 
         val fadeInFactor = if (fadeInDurationMs > 0L) {
-            val elapsed = (System.currentTimeMillis() - fadeInStartedAtMs).coerceAtLeast(0L)
+            val elapsed = (SystemClock.elapsedRealtime() - fadeInStartedAtMs).coerceAtLeast(0L)
             val tIn = (elapsed.toFloat() / fadeInDurationMs.toFloat()).coerceIn(0f, 1f)
             if (tIn >= 1f) {
                 fadeInDurationMs = 0L
@@ -673,12 +711,21 @@ class PlaybackController internal constructor(
             1f
         }
 
-        val fadeOutWindowMs = (crossfadeTotalMs / 2L)
-            .coerceAtMost((durationMs * 0.35f).toLong().coerceAtLeast(500L))
-        val remainingMs = (durationMs - positionMs).coerceAtLeast(0L)
-        val fadeOutFactor = if (durationMs > 5_000L && controller.hasNextMediaItem() && remainingMs <= fadeOutWindowMs) {
-            val tOut = (remainingMs.toFloat() / fadeOutWindowMs.toFloat()).coerceIn(0f, 1f)
-            sin(tOut * (Math.PI / 2.0)).toFloat().coerceAtLeast(0.04f)
+        val crossfadeTotalMs = _state.value.crossfadeSeconds * 1000L
+        val fadeOutFactor = if (
+            crossfadeTotalMs > 0L &&
+            durationMs > 5_000L &&
+            controller.hasNextMediaItem()
+        ) {
+            val fadeOutWindowMs = (crossfadeTotalMs / 2L)
+                .coerceAtMost((durationMs * 0.35f).toLong().coerceAtLeast(500L))
+            val remainingMs = (durationMs - positionMs).coerceAtLeast(0L)
+            if (remainingMs <= fadeOutWindowMs) {
+                val tOut = (remainingMs.toFloat() / fadeOutWindowMs.toFloat()).coerceIn(0f, 1f)
+                sin(tOut * (Math.PI / 2.0)).toFloat().coerceAtLeast(0.04f)
+            } else {
+                1f
+            }
         } else {
             1f
         }
@@ -692,10 +739,80 @@ class PlaybackController internal constructor(
     fun setCrossfadeSeconds(seconds: Int) {
         val clamped = seconds.coerceIn(0, 12)
         _state.update { it.copy(crossfadeSeconds = clamped) }
-        if (clamped == 0) {
+        if (clamped == 0 && !isFadingOutToPause) {
             fadeInDurationMs = 0L
             runOnPlayerThread {
                 mediaController?.volume = 1f
+            }
+        }
+    }
+
+    fun setSmartFadeOutEnabled(enabled: Boolean) {
+        _state.update { it.copy(smartFadeOutEnabled = enabled) }
+        if (!enabled && isFadingOutToPause) {
+            runOnPlayerThread {
+                cancelPauseFadeOut(restoreVolume = false)
+                val controller = mediaController ?: return@runOnPlayerThread
+                if (controller.isPlaying) {
+                    controller.pause()
+                }
+                controller.volume = 1f
+            }
+        }
+    }
+
+    private fun cancelPauseFadeOut(restoreVolume: Boolean) {
+        pauseFadeJob?.cancel()
+        pauseFadeJob = null
+        isFadingOutToPause = false
+        pauseRequestedBySmartFade = false
+        if (restoreVolume) {
+            mediaController?.volume = 1f
+        }
+    }
+
+    private fun performSmartPauseFadeOut(controller: Player) {
+        pauseFadeJob?.cancel()
+        isFadingOutToPause = true
+        pauseRequestedBySmartFade = false
+        fadeInDurationMs = 0L
+        AudioSpectrumBus.setPlaybackActive(false)
+        _state.update { it.copy(isPlaying = false) }
+        val startVolume = controller.volume.coerceIn(0.05f, 1f)
+        val startedAt = SystemClock.elapsedRealtime()
+        pauseFadeJob = scope.launch {
+            try {
+                while (isActive) {
+                    val activeController = mediaController
+                    if (activeController == null || activeController !== controller || !activeController.isPlaying) {
+                        break
+                    }
+                    val elapsed = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
+                    val t = (elapsed.toFloat() / SMART_PAUSE_FADE_OUT_MS.toFloat()).coerceIn(0f, 1f)
+                    val envelope = cos(t * (Math.PI / 2.0)).toFloat().coerceIn(0f, 1f)
+                    val perceptualCurve = envelope * envelope
+                    activeController.volume = (startVolume * perceptualCurve).coerceIn(0f, 1f)
+                    if (t >= 1f) {
+                        break
+                    }
+                    delay(16L)
+                }
+                val activeController = mediaController
+                if (activeController != null && activeController === controller) {
+                    activeController.volume = 0f
+                    if (activeController.isPlaying) {
+                        pauseRequestedBySmartFade = true
+                        activeController.pause()
+                    }
+                    delay(25L)
+                    if (isActive && isFadingOutToPause) {
+                        activeController.volume = 1f
+                    }
+                }
+            } finally {
+                isFadingOutToPause = false
+                pauseRequestedBySmartFade = false
+                pauseFadeJob = null
             }
         }
     }
@@ -784,6 +901,7 @@ class PlaybackController internal constructor(
         queue: List<Track> = listOf(track),
         forceRefresh: Boolean = false
     ) {
+        cancelPauseFadeOut(restoreVolume = false)
         val requestGeneration = playRequestGeneration.incrementAndGet()
         resolvePlayJob?.cancel()
         resolvePlayJob = null
@@ -1001,7 +1119,30 @@ class PlaybackController internal constructor(
                 retryActiveTrack()
                 return@runOnPlayerThread
             }
-            if (controller.isPlaying) controller.pause() else controller.play()
+            if (isFadingOutToPause) {
+                cancelPauseFadeOut(restoreVolume = false)
+                triggerResumeFadeIn(controller)
+                if (!controller.isPlaying) {
+                    controller.play()
+                }
+                _state.update { it.copy(isPlaying = true) }
+                return@runOnPlayerThread
+            }
+            if (controller.isPlaying) {
+                if (_state.value.smartFadeOutEnabled) {
+                    performSmartPauseFadeOut(controller)
+                } else {
+                    controller.volume = 1f
+                    controller.pause()
+                }
+            } else {
+                if (_state.value.smartFadeOutEnabled) {
+                    triggerResumeFadeIn(controller)
+                } else {
+                    controller.volume = 1f
+                }
+                controller.play()
+            }
         }
     }
 
@@ -1019,6 +1160,7 @@ class PlaybackController internal constructor(
 
     fun skipNext() {
         runOnPlayerThread {
+            cancelPauseFadeOut(restoreVolume = true)
             val controller = mediaController ?: return@runOnPlayerThread
             if (controller.hasNextMediaItem()) {
                 controller.seekToNextMediaItem()
@@ -1028,6 +1170,7 @@ class PlaybackController internal constructor(
 
     fun skipPrevious() {
         runOnPlayerThread {
+            cancelPauseFadeOut(restoreVolume = true)
             val controller = mediaController ?: return@runOnPlayerThread
             if (controller.currentPosition > 4_000L) {
                 seekBackCounter++
@@ -1357,6 +1500,10 @@ class PlaybackController internal constructor(
         playRequestGeneration.incrementAndGet()
         resolvePlayJob?.cancel()
         resolvePlayJob = null
+        pauseFadeJob?.cancel()
+        pauseFadeJob = null
+        isFadingOutToPause = false
+        pauseRequestedBySmartFade = false
         progressJob?.cancel()
         sleepTimerJob?.cancel()
         AudioSpectrumBus.reset()

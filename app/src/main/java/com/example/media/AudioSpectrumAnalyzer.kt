@@ -116,7 +116,7 @@ class AudioSpectrumAnalyzer(
     private var bassBaseline = 0.08f
     private var beatImpulse = 0f
     private var beatPhase = 0f
-    private var lastScheduledDeliverMs = 0L
+    private var lastScheduledDeliverMs = 0.0
 
     @Volatile
     var latestFrame: AudioVisualizerFrame = AudioVisualizerFrame.EMPTY
@@ -152,8 +152,10 @@ class AudioSpectrumAnalyzer(
             ringWriteIdx = 0
             samplesCollectedTotal = 0
             samplesSinceLastHop = 0
+            adaptivePeak = 0.08f
+            bassBaseline = 0.08f
             beatImpulse = 0f
-            lastScheduledDeliverMs = 0L
+            lastScheduledDeliverMs = 0.0
             recomputeFrequencyBands(this.sampleRateHz)
             latestFrame = AudioVisualizerFrame.EMPTY
         }
@@ -178,7 +180,7 @@ class AudioSpectrumAnalyzer(
             val frameCount = remaining / frameStride
             if (frameCount <= 0) return
 
-            val hopDurationMs = ((hopSize * 1000.0) / sampleRateHz).toLong().coerceAtLeast(10L)
+            val hopDurationMs = ((hopSize * 1000.0) / sampleRateHz).coerceAtLeast(8.0)
             val nowMs = elapsedTimeProvider()
 
             for (f in 0 until frameCount) {
@@ -199,14 +201,14 @@ class AudioSpectrumAnalyzer(
                     val frame = analyzeWindow(nowMs)
                     latestFrame = frame
 
-                    val baseTargetMs = nowMs + latencyCompensationMs
-                    val scheduledMs = if (lastScheduledDeliverMs in (nowMs - 40L)..(nowMs + 220L)) {
+                    val baseTargetMs = (nowMs + latencyCompensationMs).toDouble()
+                    val scheduledMs = if (lastScheduledDeliverMs in (nowMs - 45.0)..(nowMs + 1400.0)) {
                         maxOf(baseTargetMs, lastScheduledDeliverMs + hopDurationMs)
                     } else {
                         baseTargetMs
-                    }.coerceAtMost(nowMs + 240L)
+                    }.coerceAtMost(nowMs + 1400.0)
                     lastScheduledDeliverMs = scheduledMs
-                    onFrameProduced?.invoke(ScheduledFrame(deliverAtMs = scheduledMs, frame = frame))
+                    onFrameProduced?.invoke(ScheduledFrame(deliverAtMs = scheduledMs.toLong(), frame = frame))
                 }
             }
         }
@@ -222,7 +224,7 @@ class AudioSpectrumAnalyzer(
             bassBaseline = 0.08f
             beatImpulse = 0f
             beatPhase = 0f
-            lastScheduledDeliverMs = 0L
+            lastScheduledDeliverMs = 0.0
             latestFrame = AudioVisualizerFrame.EMPTY
         }
     }
@@ -402,13 +404,13 @@ class AudioSpectrumAnalyzer(
 
         val overallEnergy = (bassEnergy * 0.45f + midEnergy * 0.38f + highEnergy * 0.17f).coerceIn(0f, 1f)
 
-        // Bass kick onset detector
-        val isKickOnset = bassEnergy > 0.24f && bassEnergy > (bassBaseline * 1.24f + 0.055f)
-        bassBaseline = bassBaseline * 0.90f + bassEnergy * 0.10f
+        // Bass kick onset detector tuned so every beat drop & punch registers cleanly
+        val isKickOnset = bassEnergy > 0.20f && bassEnergy > (bassBaseline * 1.16f + 0.035f)
+        bassBaseline = bassBaseline * 0.89f + bassEnergy * 0.11f
         beatImpulse = if (isKickOnset) {
-            maxOf(beatImpulse, ((bassEnergy - bassBaseline) * 2.2f).coerceIn(0.55f, 1f))
+            maxOf(beatImpulse, ((bassEnergy - bassBaseline) * 2.4f).coerceIn(0.55f, 1f))
         } else {
-            (beatImpulse * 0.85f).coerceIn(0f, 1f)
+            (beatImpulse * 0.84f).coerceIn(0f, 1f)
         }
 
         // Advance continuous musical phase synced to beat energy & transients
@@ -434,8 +436,8 @@ class AudioSpectrumAnalyzer(
  */
 @OptIn(UnstableApi::class)
 object AudioSpectrumBus {
-    private const val MAX_QUEUE_SIZE = 32
-    private const val STALE_AFTER_MS = 450L
+    private const val MAX_QUEUE_SIZE = 96
+    private const val STALE_AFTER_MS = 950L
 
     private val queueLock = Any()
     private val scheduledQueue = ArrayDeque<AudioSpectrumAnalyzer.ScheduledFrame>(MAX_QUEUE_SIZE)
@@ -515,10 +517,10 @@ object AudioSpectrumBus {
             }
 
             // If a frame just arrived within the latency window and we don't yet have one delivered,
-            // prime immediately on track start instead of staying blank for 85ms.
+            // prime immediately on track start instead of staying blank.
             if (lastDeliveredFrame === AudioVisualizerFrame.EMPTY && scheduledQueue.isNotEmpty()) {
                 val first = scheduledQueue.first()
-                if (first.deliverAtMs - nowMs <= 120L) {
+                if (first.deliverAtMs - nowMs <= 160L) {
                     lastDeliveredFrame = first.frame
                     lastDeliveredAtMs = nowMs
                     return first.frame

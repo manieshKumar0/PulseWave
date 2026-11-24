@@ -1,0 +1,511 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Neon Skyline Equalizer</title>
+<style>
+  /* Layout: glowing horizon line low on the page, a skyline of glass equalizer bars above it, drifting sparks everywhere */
+  :root {
+    --bg: #05020f;
+    --fg: #ece6fb;
+    --muted: #8f86ad;
+    --violet: #8d5bff;
+    --pink: #ff6cf0;
+    --blue: #4f86ff;
+    --dock: rgba(12, 7, 30, 0.7);
+    --dock-line: rgba(150, 120, 255, 0.28);
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.4 Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+    overflow: hidden;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  .dock {
+    position: fixed;
+    left: 50%;
+    bottom: max(20px, env(safe-area-inset-bottom, 0px));
+    transform: translateX(-50%);
+    width: min(560px, calc(100% - 32px));
+    box-sizing: border-box;
+    padding: 12px 14px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    background: var(--dock);
+    border: 1px solid var(--dock-line);
+    border-radius: 14px;
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    transition: opacity .6s ease;
+  }
+  .dock.idle { opacity: 0; pointer-events: none; }
+  button, label.btn {
+    font: inherit;
+    color: var(--fg);
+    background: rgba(141, 91, 255, 0.26);
+    border: 1px solid var(--dock-line);
+    border-radius: 9px;
+    padding: 8px 14px;
+    cursor: pointer;
+  }
+  button:hover, label.btn:hover { background: rgba(255, 108, 240, 0.3); }
+  button:focus-visible, label.btn:focus-within { outline: 2px solid var(--blue); outline-offset: 2px; }
+  input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  .status { flex: 1 1 100%; color: var(--muted); font-size: 12.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  audio { flex: 1 1 100%; height: 34px; }
+  audio[hidden] { display: none; }
+  .hint {
+    position: fixed; top: max(16px, env(safe-area-inset-top, 0px)); left: 16px; right: 16px;
+    text-align: center; color: var(--muted); font-size: 12.5px; letter-spacing: .04em;
+    pointer-events: none; transition: opacity .6s ease;
+  }
+  .hint.gone { opacity: 0; }
+</style>
+
+<canvas id="c"></canvas>
+<div class="hint" id="hint">Load a music file, drop one anywhere, or play the demo beat</div>
+
+<div class="dock" id="dock">
+  <label class="btn" for="file">Load music<input id="file" type="file" accept="audio/*"></label>
+  <button id="demo" type="button">Play demo beat</button>
+  <button id="stop" type="button" hidden>Stop</button>
+  <audio id="player" controls hidden></audio>
+  <div class="status" id="status">Idle. The skyline sways slowly until music plays.</div>
+</div>
+
+<script>
+(function () {
+  var canvas = document.getElementById('c');
+  var ctx = canvas.getContext('2d');
+  var dpr = Math.min(window.devicePixelRatio || 1, 2);
+  var W = 0, H = 0, base = 0, bars = [], spikes = [], parts = [], sprites = {};
+  var MAXP = 420;
+
+  function rnd(a, b) { return a + Math.random() * (b - a); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  // ambient sparks live only in a zone around the visualizer
+  function ZL() { return W * 0.1; }
+  function ZR() { return W * 0.9; }
+  function ZT() { return base - H * 0.5; }
+  function ZB() { return base + H * 0.09; }
+
+  // ---- glow sprites (pre-rendered soft dots) ----
+  function makeSprite(r, g, b) {
+    var s = 64, c = document.createElement('canvas');
+    c.width = c.height = s;
+    var x = c.getContext('2d');
+    var gr = x.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    gr.addColorStop(0, 'rgba(255,255,255,1)');
+    gr.addColorStop(0.18, 'rgba(' + r + ',' + g + ',' + b + ',0.85)');
+    gr.addColorStop(0.5, 'rgba(' + r + ',' + g + ',' + b + ',0.18)');
+    gr.addColorStop(1, 'rgba(' + r + ',' + g + ',' + b + ',0)');
+    x.fillStyle = gr; x.fillRect(0, 0, s, s);
+    return c;
+  }
+  sprites.blue = makeSprite(90, 150, 255);
+  sprites.violet = makeSprite(170, 110, 255);
+  sprites.pink = makeSprite(255, 120, 240);
+  sprites.white = makeSprite(200, 220, 255);
+  var SP = ['blue', 'violet', 'pink', 'white', 'white', 'blue'];
+
+  // colour along the skyline: blue at the edges, violet, then pink at the centre
+  function tint(d) {
+    var t = Math.max(0, Math.min(1, 1 - d));              // 1 at centre
+    var r, g, b;
+    if (t < 0.55) { var k = t / 0.55; r = lerp(80, 150, k); g = lerp(135, 95, k); b = lerp(255, 255, k); }
+    else { var k2 = (t - 0.55) / 0.45; r = lerp(150, 255, k2); g = lerp(95, 115, k2); b = lerp(255, 245, k2); }
+    return [r | 0, g | 0, b | 0];
+  }
+
+  // ---- layout ----
+  function build() {
+    bars = []; spikes = [];
+    var bandL = W * 0.15, bandR = W * 0.85, x = bandL;
+    var unit = Math.max(0.7, Math.min(1.5, W / 1100));
+    while (x < bandR) {
+      var w = rnd(4, 11) * unit, gap = rnd(2, 7) * unit;
+      var u = (x + w / 2 - W / 2) / ((bandR - bandL) / 2);   // -1..1
+      bars.push({
+        x: x, w: w, d: Math.abs(u), u: u,
+        mul: rnd(0.55, 1), h: 0, cap: 0, capV: 0,
+        sp: rnd(0.35, 1.1), ph: rnd(0, 6.28), prev: 0
+      });
+      x += w + gap;
+    }
+    for (var s = 0; s < 12; s++) {                          // tall thin spikes near the middle
+      var su = rnd(-0.5, 0.5);
+      spikes.push({ x: W / 2 + su * (bandR - bandL) / 2, d: Math.abs(su), h: 0, boost: rnd(1.1, 1.7), sp: rnd(0.4, 1.2), ph: rnd(0, 6.28) });
+    }
+  }
+
+  // sparks are born at the tips of the bars and spikes
+  function addParticle(prewarm) {
+    if (parts.length >= MAXP) return null;
+    var x, y, d;
+    if (Math.random() < 0.2 && spikes.length) {                  // the thin spikes shed sparks too
+      var sk = spikes[(Math.random() * spikes.length) | 0];
+      x = sk.x; y = base - sk.h; d = sk.d;
+    } else {                                                     // otherwise pick the taller of two random bars
+      var b1 = bars[(Math.random() * bars.length) | 0], b2 = bars[(Math.random() * bars.length) | 0];
+      var tb = b1.h > b2.h ? b1 : b2;
+      x = tb.x + rnd(0, tb.w); y = base - tb.h; d = tb.d;
+    }
+    if (y > base - 6) return null;                               // flat bars emit nothing
+    var up = Math.random() < 0.8;
+    var p = {
+      x: x, y: y + rnd(-1, 1),
+      vx: rnd(-7, 7),
+      vy: up ? -(rnd(8, 34) * (1 - activity) + rnd(35, 120) * activity * (0.7 + E.b * 0.9 + pulse * 0.7)) : rnd(4, 14),
+      size: rnd(0.8, 2.2),
+      ph: rnd(0, 6.28), ts: rnd(1.2, 3.8),
+      spr: d < 0.28 && Math.random() < 0.6 ? 'pink' : SP[(Math.random() * SP.length) | 0],
+      life: rnd(0.7, 1.7) * (1 + activity * 1.0), age: 0, sq: Math.random() < 0.5
+    };
+    if (prewarm) { p.age = Math.random() * p.life; p.x += p.vx * p.age; p.y += p.vy * p.age; }
+    parts.push(p);
+    return p;
+  }
+
+  function resize() {
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+    base = Math.round(H * 0.7);
+    build();
+    parts = [];
+    var n = Math.round(Math.min(90, Math.max(30, W / 14)));
+    for (var i = 0; i < n; i++) addParticle(true);
+  }
+  window.addEventListener('resize', resize);
+
+  // ---- audio ----
+  var AC = null, analyser = null, freq = null, master = null;
+  var mediaSrc = null, demoTimer = null, demoOn = false;
+  var player = document.getElementById('player');
+  var statusEl = document.getElementById('status');
+  var activity = 0, pulse = 0, bassAvg = 0.1, lastBeat = 0;
+  var E = { b: 0, m: 0, h: 0 };
+
+  function ensureAudio() {
+    if (AC) { if (AC.state === 'suspended') AC.resume(); return; }
+    AC = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = AC.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.6;
+    freq = new Uint8Array(analyser.frequencyBinCount);
+    master = AC.createGain();
+    master.gain.value = 0.9;
+    master.connect(analyser);
+    analyser.connect(AC.destination);
+  }
+  function loadFile(f) {
+    if (!f) return;
+    ensureAudio();
+    stopDemo();
+    if (!mediaSrc) { mediaSrc = AC.createMediaElementSource(player); mediaSrc.connect(master); }
+    player.src = URL.createObjectURL(f);
+    player.hidden = false;
+    player.play().catch(function () {});
+    statusEl.textContent = 'Playing: ' + f.name;
+    hideHint();
+  }
+  document.getElementById('file').addEventListener('change', function (e) { loadFile(e.target.files[0]); });
+  window.addEventListener('dragover', function (e) { e.preventDefault(); });
+  window.addEventListener('drop', function (e) {
+    e.preventDefault();
+    var f = e.dataTransfer && e.dataTransfer.files[0];
+    if (f && /^audio|video/.test(f.type)) loadFile(f);
+  });
+
+  // demo beat
+  var nextNote = 0, step = 0, BPM = 112, nb;
+  function noiseBuf() {
+    var len = AC.sampleRate * 0.2, buf = AC.createBuffer(1, len, AC.sampleRate), d = buf.getChannelData(0);
+    for (var i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    return buf;
+  }
+  function schedule(t, s) {
+    var spb = 60 / BPM / 2;
+    if (s % 2 === 0) {
+      var o = AC.createOscillator(), g = AC.createGain();
+      o.frequency.setValueAtTime(150, t); o.frequency.exponentialRampToValueAtTime(44, t + 0.14);
+      g.gain.setValueAtTime(1, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+      o.connect(g); g.connect(master); o.start(t); o.stop(t + 0.42);
+    }
+    if (s % 2 === 1) {
+      var n = AC.createBufferSource(), hp = AC.createBiquadFilter(), hg = AC.createGain();
+      n.buffer = nb; hp.type = 'highpass'; hp.frequency.value = 7000;
+      hg.gain.setValueAtTime(0.35, t); hg.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
+      n.connect(hp); hp.connect(hg); hg.connect(master); n.start(t); n.stop(t + 0.1);
+    }
+    if (s % 4 === 2) {
+      var c = AC.createBufferSource(), bp = AC.createBiquadFilter(), cg = AC.createGain();
+      c.buffer = nb; bp.type = 'bandpass'; bp.frequency.value = 1800; bp.Q.value = 0.8;
+      cg.gain.setValueAtTime(0.5, t); cg.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+      c.connect(bp); bp.connect(cg); cg.connect(master); c.start(t); c.stop(t + 0.2);
+    }
+    var bassNotes = [55, 55, 82.4, 55, 65.4, 65.4, 98, 73.4];
+    if (s % 2 === 1 || s % 8 === 0) {
+      var bo = AC.createOscillator(), lp = AC.createBiquadFilter(), bg = AC.createGain();
+      bo.type = 'sawtooth'; bo.frequency.value = bassNotes[s % 8];
+      lp.type = 'lowpass'; lp.frequency.value = 520;
+      bg.gain.setValueAtTime(0.28, t); bg.gain.exponentialRampToValueAtTime(0.001, t + spb * 1.6);
+      bo.connect(lp); lp.connect(bg); bg.connect(master); bo.start(t); bo.stop(t + spb * 1.7);
+    }
+    if (s % 16 === 0) {
+      var chords = [[220, 261.6, 329.6], [196, 246.9, 293.7]];
+      chords[(s / 16) % 2 | 0].forEach(function (f) {
+        var po = AC.createOscillator(), pg = AC.createGain();
+        po.type = 'triangle'; po.frequency.value = f;
+        pg.gain.setValueAtTime(0.0001, t); pg.gain.linearRampToValueAtTime(0.1, t + 0.6);
+        pg.gain.linearRampToValueAtTime(0.0001, t + spb * 15);
+        po.connect(pg); pg.connect(master); po.start(t); po.stop(t + spb * 15.5);
+      });
+    }
+    if (s % 4 === 3 || s % 8 === 5) {
+      var ho = AC.createOscillator(), hg2 = AC.createGain();
+      ho.type = 'square'; ho.frequency.value = [880, 1174.7, 1318.5, 988][(s >> 1) % 4];
+      hg2.gain.setValueAtTime(0.07, t); hg2.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+      ho.connect(hg2); hg2.connect(master); ho.start(t); ho.stop(t + 0.14);
+    }
+  }
+  function tick() {
+    var spb = 60 / BPM / 2;
+    while (nextNote < AC.currentTime + 0.12) { schedule(nextNote, step); nextNote += spb; step++; }
+  }
+  function startDemo() {
+    ensureAudio();
+    player.pause();
+    nb = nb || noiseBuf();
+    step = 0; nextNote = AC.currentTime + 0.08;
+    demoOn = true;
+    demoTimer = setInterval(tick, 25);
+    document.getElementById('stop').hidden = false;
+    document.getElementById('demo').hidden = true;
+    statusEl.textContent = 'Playing: demo beat (' + BPM + ' BPM)';
+    hideHint();
+  }
+  function stopDemo() {
+    if (!demoOn) return;
+    demoOn = false; clearInterval(demoTimer);
+    document.getElementById('stop').hidden = true;
+    document.getElementById('demo').hidden = false;
+    statusEl.textContent = 'Idle. The skyline sways slowly until music plays.';
+  }
+  document.getElementById('demo').addEventListener('click', startDemo);
+  document.getElementById('stop').addEventListener('click', stopDemo);
+  player.addEventListener('play', function () { stopDemo(); ensureAudio(); });
+
+  var hint = document.getElementById('hint'), dock = document.getElementById('dock'), idleT;
+  function hideHint() { hint.classList.add('gone'); }
+  function wake() {
+    dock.classList.remove('idle');
+    clearTimeout(idleT);
+    idleT = setTimeout(function () { dock.classList.add('idle'); }, 4500);
+  }
+  ['mousemove', 'pointerdown', 'keydown', 'touchstart'].forEach(function (ev) { window.addEventListener(ev, wake, { passive: true }); });
+  wake();
+
+  // ---- analysis ----
+  var spec = null;
+  function analyse() {
+    analyser.getByteFrequencyData(freq);
+    var hz = AC.sampleRate / analyser.fftSize;
+    var bEnd = Math.max(3, Math.round(160 / hz)), mEnd = Math.round(2200 / hz), hEnd = Math.min(freq.length, Math.round(9000 / hz));
+    function avg(a, b) { var s = 0; for (var i = a; i < b; i++) s += freq[i]; return s / ((b - a) * 255); }
+    var tb = Math.pow(avg(1, bEnd), 1.5) * 1.5, tm = Math.pow(avg(bEnd, mEnd), 1.3) * 2.2, th = Math.pow(avg(mEnd, hEnd), 1.1) * 3;
+    function ease(c, t) { return c + (t - c) * (t > c ? 0.5 : 0.1); }
+    E.b = Math.min(1, ease(E.b, tb)); E.m = Math.min(1, ease(E.m, tm)); E.h = Math.min(1, ease(E.h, th));
+    var now = performance.now();
+    bassAvg = bassAvg * 0.96 + tb * 0.04;
+    if (tb > bassAvg * 1.3 && tb > 0.3 && now - lastBeat > 170) { pulse = 1; lastBeat = now; }
+    return { hz: hz, lo: Math.max(1, Math.round(40 / hz)), hi: Math.min(freq.length - 1, Math.round(7500 / hz)) };
+  }
+  function binValue(info, d) {
+    var pos = info.lo + (info.hi - info.lo) * Math.pow(d, 1.8);
+    var a = Math.floor(pos), f = pos - a;
+    var v = (freq[a] * (1 - f) + freq[Math.min(freq.length - 1, a + 1)] * f) / 255;
+    return Math.pow(Math.min(1.3, v * (1 + d * 1.5)), 1.4);
+  }
+
+  // ---- drawing helpers ----
+  function drawBars(mirror, T) {
+    var s = mirror ? 1 : -1, fall = mirror ? 0.5 : 1, A = mirror ? 0.2 : 1;
+    for (var i = 0; i < bars.length; i++) {
+      var b = bars[i], hh = b.h * fall;
+      if (hh < 1.5) continue;
+      var c = tint(b.d), y1 = base + s * hh;
+      var gr = ctx.createLinearGradient(0, base, 0, y1);
+      gr.addColorStop(0, 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + (0.42 * A) + ')');
+      gr.addColorStop(1, 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + (0.07 * A) + ')');
+      ctx.fillStyle = gr;
+      ctx.fillRect(b.x, Math.min(base, y1), b.w, hh);
+      ctx.strokeStyle = 'rgba(' + Math.min(255, c[0] + 40) + ',' + Math.min(255, c[1] + 40) + ',' + Math.min(255, c[2] + 10) + ',' + (0.8 * A) + ')';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(b.x + 0.5, Math.min(base, y1) + 0.5, b.w - 1, hh - 1);
+      if (!mirror) {                                        // bright top edge + floating peak cap
+        ctx.fillStyle = 'rgba(235,225,255,0.85)';
+        ctx.fillRect(b.x, y1, b.w, 1.5);
+        if (b.cap > b.h + 5) {
+          ctx.fillStyle = 'rgba(' + Math.min(255, c[0] + 60) + ',' + Math.min(255, c[1] + 60) + ',255,0.9)';
+          ctx.fillRect(b.x + b.w / 2 - 1.2, base - b.cap - 3, 2.4, 2.4);
+        }
+      }
+    }
+    for (var k = 0; k < spikes.length; k++) {
+      var sp = spikes[k];
+      if (sp.h < 6) continue;
+      var cc = tint(sp.d), yy = base + s * sp.h * fall;
+      var g2 = ctx.createLinearGradient(0, base, 0, yy);
+      g2.addColorStop(0, 'rgba(' + cc[0] + ',' + cc[1] + ',' + cc[2] + ',' + (0.8 * A) + ')');
+      g2.addColorStop(1, 'rgba(' + cc[0] + ',' + cc[1] + ',' + cc[2] + ',0.05)');
+      ctx.strokeStyle = g2; ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(sp.x, base); ctx.lineTo(sp.x, yy); ctx.stroke();
+    }
+  }
+
+  function flare(x, y, r, spr, a, streak) {
+    ctx.globalAlpha = Math.min(1, a);
+    ctx.drawImage(sprites[spr], x - r, y - r, r * 2, r * 2);
+    if (streak) {
+      ctx.globalAlpha = Math.min(1, a * 0.6);
+      ctx.drawImage(sprites[spr], x - streak, y - r * 0.18, streak * 2, r * 0.36);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- main loop ----
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var last = performance.now(), T = 0, spawnAcc = 0;
+  var FLARES = [
+    { u: 0.215, spr: 'blue', band: 'h', r: 22 },
+    { u: 0.335, spr: 'white', band: 'm', r: 24 },
+    { u: 0.494, spr: 'pink', band: 'b', r: 46 },
+    { u: 0.63, spr: 'white', band: 'm', r: 22 },
+    { u: 0.675, spr: 'blue', band: 'h', r: 20 },
+    { u: 0.772, spr: 'blue', band: 'h', r: 26 }
+  ];
+
+  function frame(now) {
+    var dt = Math.min(0.05, (now - last) / 1000); last = now;
+    T += dt * (reduce ? 0.4 : 1);
+
+    var hasAudio = analyser && (demoOn || (!player.paused && !player.ended));
+    var info = null;
+    if (hasAudio) info = analyse(); else { E.b *= 0.9; E.m *= 0.9; E.h *= 0.9; }
+    activity += ((hasAudio ? 1 : 0) - activity) * Math.min(1, dt * 3);
+    pulse *= 0.9;
+
+    var maxH = H * 0.5;
+    // bar heights
+    for (var i = 0; i < bars.length; i++) {
+      var b = bars[i];
+      var idle = (0.09 + 0.5 * Math.exp(-Math.pow(b.d / 0.5, 2))) * (0.4 + 0.6 * (0.5 + 0.5 * Math.sin(T * b.sp + b.ph)));
+      var tgt = idle * (1 - activity * 0.85);
+      if (hasAudio) tgt += binValue(info, b.d) * activity * 1.05 + pulse * 0.05 * Math.exp(-Math.pow(b.d / 0.4, 2));
+      tgt = Math.min(1, tgt * b.mul) * maxH;
+      var prev = b.h;
+      b.h += (tgt - b.h) * (tgt > b.h ? 0.5 : 0.13);
+      if (b.h >= b.cap) { b.cap = b.h; b.capV = 0; } else { b.capV += 1500 * dt; b.cap = Math.max(b.h, b.cap - b.capV * dt); }
+    }
+    for (var k = 0; k < spikes.length; k++) {
+      var sp = spikes[k];
+      var center = Math.exp(-Math.pow(sp.d / 0.45, 2));
+      var st = (0.1 + 0.45 * (0.5 + 0.5 * Math.sin(T * sp.sp + sp.ph))) * center * (1 - activity * 0.8);
+      if (hasAudio) st += (E.b * 0.8 + E.m * 0.4 + pulse * 0.25) * center * activity * 0.9;
+      st = Math.min(1, st) * sp.boost * maxH;
+      sp.h += (st - sp.h) * (st > sp.h ? 0.45 : 0.1);
+    }
+
+    // background
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#05020f';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    var haze = ctx.createLinearGradient(0, 0, 0, H);
+    haze.addColorStop(0, 'rgba(18,8,48,0.55)');
+    haze.addColorStop(0.6, 'rgba(34,12,78,0.35)');
+    haze.addColorStop(1, 'rgba(4,2,12,0)');
+    ctx.fillStyle = haze; ctx.fillRect(0, 0, W, H);
+
+    ctx.globalCompositeOperation = 'lighter';
+    var glowA = 0.5 + E.b * 0.7 + pulse * 0.25;
+    ctx.save();
+    ctx.translate(W / 2, base); ctx.scale(1, 0.42);
+    var rg = ctx.createRadialGradient(0, 0, 0, 0, 0, W * 0.5);
+    rg.addColorStop(0, 'rgba(120,50,200,' + (0.5 * glowA) + ')');
+    rg.addColorStop(0.35, 'rgba(70,30,150,' + (0.3 * glowA) + ')');
+    rg.addColorStop(1, 'rgba(20,10,60,0)');
+    ctx.fillStyle = rg; ctx.fillRect(-W / 2, -W / 2, W, W);
+    ctx.restore();
+
+    // skyline and reflection
+    drawBars(true, T);
+    drawBars(false, T);
+
+    // horizon lines
+    var lg = ctx.createLinearGradient(W * 0.03, 0, W * 0.97, 0);
+    lg.addColorStop(0, 'rgba(80,130,255,0)');
+    lg.addColorStop(0.2, 'rgba(90,150,255,0.7)');
+    lg.addColorStop(0.5, 'rgba(255,170,250,0.95)');
+    lg.addColorStop(0.8, 'rgba(90,150,255,0.7)');
+    lg.addColorStop(1, 'rgba(80,130,255,0)');
+    ctx.fillStyle = lg;
+    ctx.fillRect(W * 0.03, base - 0.5, W * 0.94, 1.4);
+    ctx.globalAlpha = 0.35;
+    ctx.fillRect(W * 0.1, base + 7, W * 0.8, 1);
+    ctx.globalAlpha = 1;
+
+    // flares on the horizon
+    for (var f = 0; f < FLARES.length; f++) {
+      var F = FLARES[f], e = E[F.band];
+      var twinkle = 0.75 + 0.25 * Math.sin(T * (1.3 + f * 0.37) + f);
+      var r = F.r * (0.8 + e * 1.4 + (F.band === 'b' ? pulse * 0.5 : 0)) * (reduce ? 0.8 : 1);
+      flare(W * F.u, base, r, F.spr, (0.55 + e * 0.8) * twinkle, F.band === 'b' ? W * 0.07 + E.b * W * 0.05 : r * 2.2);
+    }
+
+    // particles
+    var speedMul = 1 + E.h * 0.6, bright = 0.65 + E.h * 1.1 + pulse * 0.3;
+    for (var j = parts.length - 1; j >= 0; j--) {
+      var q = parts[j];
+      q.age += dt;
+      if (q.life > 0 && q.age > q.life) { parts.splice(j, 1); continue; }
+      q.x += q.vx * dt * speedMul; q.y += q.vy * dt * speedMul;
+      if (q.life < 0) {                                      // ambient sparks wrap around
+        if (q.x < ZL()) q.x = ZR(); if (q.x > ZR()) q.x = ZL();
+        if (q.y < ZT()) q.y = ZB(); if (q.y > ZB()) q.y = ZT();
+      }
+      var tw = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(T * q.ts + q.ph));
+      var fade = q.life > 0 ? Math.max(0, 1 - q.age / q.life) : 1;
+      if (q.life < 0) {                                      // soft falloff toward the zone edges
+        var ef = Math.min((q.x - ZL()) / (W * 0.08), (ZR() - q.x) / (W * 0.08), (q.y - ZT()) / (H * 0.12), (ZB() - q.y) / (H * 0.04));
+        fade *= Math.max(0, Math.min(1, ef));
+      }
+      var a = Math.min(1, tw * fade * bright);
+      var rr = q.size * 5;
+      ctx.globalAlpha = a * 0.55;
+      ctx.drawImage(sprites[q.spr], q.x - rr, q.y - rr, rr * 2, rr * 2);
+      ctx.globalAlpha = a;
+      ctx.fillStyle = '#eef0ff';
+      if (q.sq) ctx.fillRect(q.x - q.size * 0.5, q.y - q.size * 0.5, q.size, q.size);
+      else ctx.fillRect(q.x - q.size * 0.4, q.y - q.size * 0.4, q.size * 0.8, q.size * 0.8);
+    }
+    ctx.globalAlpha = 1;
+
+    // steady trickle of new sparks from the line; the beat and highs make it spray more
+    spawnAcc += dt * (W / 1100) * (34 + E.h * 90 + E.b * 70 + pulse * 140);
+    while (spawnAcc >= 1) { spawnAcc -= 1; addParticle(false); }
+
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+
+</body></html>

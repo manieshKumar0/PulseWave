@@ -141,7 +141,7 @@ fun ForYouScreen(
             }
             is UiState.Success -> {
                 val bundle = discoveryState.data
-                val allQueue = (bundle.heroPicks + bundle.replayPicks + bundle.explorePicks)
+                val allQueue = (bundle.heroPicks + bundle.explorePicks)
                     .map { it.track }
                     .distinctBy { it.id }
 
@@ -228,23 +228,6 @@ fun ForYouScreen(
                                     onRecordDwell = { dwell -> onRecordDwell(pick.track, dwell) }
                                 )
                             }
-                        }
-                    }
-
-                    if (bundle.replayPicks.isNotEmpty()) {
-                        item {
-                            Text("Replay Radar", style = MaterialTheme.typography.titleLarge)
-                        }
-                        items(bundle.replayPicks, key = { "replay_${it.track.id}" }) { pick ->
-                            TrackRowItem(
-                                track = pick.track,
-                                isActive = pick.track.id == activeTrackId,
-                                downloadProgress = downloadProgress[pick.track.id],
-                                onPlay = { onPlayTrack(pick.track, allQueue) },
-                                onToggleLike = { onToggleLike(pick.track) },
-                                onDownloadClick = { onDownloadClick(pick.track) },
-                                onShareClick = { onShareClick(pick.track) }
-                            )
                         }
                     }
 

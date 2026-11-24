@@ -58,6 +58,7 @@ import com.example.media.PlaybackUiState
 import com.example.ui.components.BeatReactiveWaveformCanvas
 import com.example.ui.components.ObsidianGlassCard
 import com.example.ui.components.TrackArtworkThumb
+import com.example.ui.components.VisualizerStyle
 import com.example.ui.theme.MintElectric
 import com.example.ui.theme.UltravioletPulse
 
@@ -203,6 +204,7 @@ fun PulseRoomScreen(
                         isPlaying = playbackState.isPlaying,
                         primaryColor = MintElectric,
                         secondaryColor = UltravioletPulse,
+                        style = VisualizerStyle.CLASSIC_PULSE,
                         modifier = Modifier.fillMaxWidth().height(44.dp)
                     )
 

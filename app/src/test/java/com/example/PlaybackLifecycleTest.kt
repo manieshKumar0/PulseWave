@@ -836,6 +836,142 @@ class PlaybackLifecycleTest {
         reconnected.release()
     }
 
+    @Test
+    fun smartFadeOut_tapersVolumeBeforePauseAndRestoresVolume() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val fakePlayer = FakeMediaPlayer()
+        val controller = PlaybackController(
+            context = context,
+            signalDao = NoOpSignalDao(),
+            youtubeClient = YouTubeMusicClient(),
+            injectedPlayer = fakePlayer.player,
+            autoConnectController = false
+        )
+        controller.setCrossfadeSeconds(0)
+        controller.setSmartFadeOutEnabled(true)
+
+        val localTrack = Track(
+            id = "device_ms_fade_1",
+            title = "Fade Out Song",
+            artist = "Pulse Artist",
+            localUri = "content://media/external/audio/media/901",
+            sourceType = TrackSourceType.LOCAL_SAF
+        )
+
+        controller.playTrack(localTrack, listOf(localTrack))
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(fakePlayer.isPlaying)
+        assertEquals(1f, fakePlayer.volume, 0.02f)
+
+        // Manual pause triggers Smart Fade-Out
+        controller.togglePlayPause()
+        assertFalse(controller.state.value.isPlaying)
+
+        // Advance halfway (~200ms): still playing while volume tapers smoothly below 1f
+        val observedMidVolumes = mutableListOf<Float>()
+        repeat(12) {
+            shadowOf(Looper.getMainLooper()).idleFor(18, TimeUnit.MILLISECONDS)
+            observedMidVolumes.add(fakePlayer.volume)
+        }
+        assertTrue("Expected player to still be playing mid fade-out", fakePlayer.isPlaying)
+        assertTrue(
+            "Expected tapered volume below 0.85 mid fade-out, got $observedMidVolumes",
+            observedMidVolumes.last() < 0.85f && observedMidVolumes.last() > 0f
+        )
+
+        // Advance past fade-out + 25ms settle: player pauses cleanly and restores volume to 1f
+        repeat(24) {
+            shadowOf(Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
+        }
+        assertFalse(fakePlayer.isPlaying)
+        assertFalse(controller.state.value.isPlaying)
+        assertEquals(1f, fakePlayer.volume, 0.02f)
+
+        controller.release()
+    }
+
+    @Test
+    fun smartFadeOut_midFadeResumeCancelsPauseAndRestoresPlayback() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val fakePlayer = FakeMediaPlayer()
+        val controller = PlaybackController(
+            context = context,
+            signalDao = NoOpSignalDao(),
+            youtubeClient = YouTubeMusicClient(),
+            injectedPlayer = fakePlayer.player,
+            autoConnectController = false
+        )
+        controller.setCrossfadeSeconds(0)
+        controller.setSmartFadeOutEnabled(true)
+
+        val localTrack = Track(
+            id = "device_ms_fade_2",
+            title = "Resume Mid Fade",
+            artist = "Pulse Artist",
+            localUri = "content://media/external/audio/media/902",
+            sourceType = TrackSourceType.LOCAL_SAF
+        )
+
+        controller.playTrack(localTrack, listOf(localTrack))
+        shadowOf(Looper.getMainLooper()).idle()
+
+        controller.togglePlayPause()
+        repeat(10) {
+            shadowOf(Looper.getMainLooper()).idleFor(18, TimeUnit.MILLISECONDS)
+        }
+        assertTrue(fakePlayer.isPlaying)
+        assertTrue(fakePlayer.volume < 0.9f)
+
+        // User taps Play before fade completes -> must stay playing and ramp back to full volume
+        controller.togglePlayPause()
+        assertTrue(controller.state.value.isPlaying)
+        assertTrue(fakePlayer.isPlaying)
+
+        repeat(20) {
+            shadowOf(Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
+        }
+        assertTrue(fakePlayer.isPlaying)
+        assertTrue(controller.state.value.isPlaying)
+        assertEquals(1f, fakePlayer.volume, 0.05f)
+
+        controller.release()
+    }
+
+    @Test
+    fun smartFadeOut_whenDisabledPausesImmediatelyWithoutFade() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val fakePlayer = FakeMediaPlayer()
+        val controller = PlaybackController(
+            context = context,
+            signalDao = NoOpSignalDao(),
+            youtubeClient = YouTubeMusicClient(),
+            injectedPlayer = fakePlayer.player,
+            autoConnectController = false
+        )
+        controller.setCrossfadeSeconds(0)
+        controller.setSmartFadeOutEnabled(false)
+
+        val localTrack = Track(
+            id = "device_ms_fade_3",
+            title = "Instant Pause",
+            artist = "Pulse Artist",
+            localUri = "content://media/external/audio/media/903",
+            sourceType = TrackSourceType.LOCAL_SAF
+        )
+
+        controller.playTrack(localTrack, listOf(localTrack))
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(fakePlayer.isPlaying)
+
+        controller.togglePlayPause()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertFalse(fakePlayer.isPlaying)
+        assertFalse(controller.state.value.isPlaying)
+        assertEquals(1f, fakePlayer.volume, 0.01f)
+
+        controller.release()
+    }
+
     private fun fakeStream(url: String): ResolvedAudioStream = ResolvedAudioStream(
         url = url,
         mimeType = "audio/mp4",

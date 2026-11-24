@@ -6,9 +6,31 @@ import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -16,12 +38,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
@@ -32,11 +56,11 @@ import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.SearchOff
 import androidx.compose.material.icons.rounded.ThumbUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -48,20 +72,30 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -79,12 +113,11 @@ import com.example.ui.components.TrackRowItem
 import com.example.ui.theme.UltravioletPulse
 import com.example.ui.viewmodel.UiState
 
-private enum class LibraryFilter(val label: String) {
-    ALL("All"),
-    DOWNLOADED("Downloaded"),
-    DEVICE("Device"),
-    CLOUD_DRIVE("Cloud Drive"),
-    SHARED_PLAYLISTS("Shared Playlists")
+private enum class LibraryFilter(val label: String, val widthWeight: Float) {
+    ALL("All", 0.72f),
+    DOWNLOADED("Downloaded", 1.48f),
+    DEVICE("Device", 0.90f),
+    SHARED("Shared", 0.90f)
 }
 
 @Composable
@@ -133,15 +166,29 @@ fun LibraryScreen(
     }
 
     var searchQuery by remember { mutableStateOf("") }
+    val filters = LibraryFilter.entries
     var selectedFilter by remember { mutableStateOf(LibraryFilter.ALL) }
+    val listStates = remember { LibraryFilter.entries.associateWith { LazyListState() } }
+    val haptics = LocalHapticFeedback.current
     var showCreatePlaylistDialog by remember { mutableStateOf(false) }
 
-    DisposableEffect(lifecycleOwner, selectedFilter) {
+    LaunchedEffect(selectedFilter) {
+        if (selectedFilter == LibraryFilter.DEVICE) {
+            val permitted = SafMusicImporter.hasDeviceAudioPermission(context)
+            hasAudioPermission = permitted
+            if (permitted) {
+                onScanDeviceAudio(true)
+            }
+        }
+    }
+
+    val currentSelectedFilter by rememberUpdatedState(selectedFilter)
+    DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 val permitted = SafMusicImporter.hasDeviceAudioPermission(context)
                 hasAudioPermission = permitted
-                if (permitted && selectedFilter == LibraryFilter.DEVICE) {
+                if (permitted && currentSelectedFilter == LibraryFilter.DEVICE) {
                     onScanDeviceAudio(true)
                 }
             }
@@ -150,92 +197,135 @@ fun LibraryScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    val filteredTracks = remember(tracks, searchResults, searchQuery, selectedFilter) {
+    val tracksByFilter = remember(tracks, searchResults, searchQuery) {
         val base = if (searchQuery.isNotBlank()) searchResults else tracks
-        when (selectedFilter) {
-            LibraryFilter.ALL -> base.filter {
+        mapOf(
+            LibraryFilter.ALL to base.filter {
                 it.sourceType != TrackSourceType.LOCAL_SAF &&
                     it.sourceType != TrackSourceType.CLOUD_SAF
-            }
-            LibraryFilter.DOWNLOADED -> base.filter { it.isDownloaded }
-            LibraryFilter.DEVICE -> base.filter {
+            },
+            LibraryFilter.DOWNLOADED to base.filter { it.isDownloaded },
+            LibraryFilter.DEVICE to base.filter {
                 it.sourceType == TrackSourceType.LOCAL_SAF &&
                     (!it.id.startsWith(SafMusicImporter.DEVICE_TRACK_ID_PREFIX) ||
                         it.durationMs > SafMusicImporter.DEFAULT_MIN_DURATION_MS)
-            }
-            LibraryFilter.CLOUD_DRIVE -> base.filter { it.sourceType == TrackSourceType.CLOUD_SAF }
-            LibraryFilter.SHARED_PLAYLISTS -> emptyList()
-        }
+            },
+            LibraryFilter.SHARED to emptyList()
+        )
     }
 
-    LazyColumn(
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 140.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp)
     ) {
-        item {
-            PulseScreenHeader(
-                title = "Library & Vault",
-                titleTestTag = "library_header_title"
-            )
-        }
+        Spacer(Modifier.height(12.dp))
+        PulseScreenHeader(
+            title = "Library & Vault",
+            titleTestTag = "library_header_title"
+        )
+        Spacer(Modifier.height(12.dp))
 
         // Search input
-        item {
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = {
-                    searchQuery = it
-                    onSearchQuery(it)
-                },
-                placeholder = { Text("Search any song, artist, or YouTube link") },
-                leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
-                trailingIcon = {
-                    if (isSearching) {
-                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                    } else if (searchQuery.isNotBlank()) {
-                        IconButton(onClick = {
-                            searchQuery = ""
-                            onSearchQuery("")
-                        }) {
-                            Icon(Icons.Rounded.Close, contentDescription = "Clear search")
-                        }
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = {
+                searchQuery = it
+                onSearchQuery(it)
+            },
+            placeholder = {
+                Text(
+                    text = "Search any song, artist, or YouTube link",
+                    style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp),
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            },
+            textStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp),
+            leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
+            trailingIcon = {
+                if (isSearching) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                } else if (searchQuery.isNotBlank()) {
+                    IconButton(onClick = {
+                        searchQuery = ""
+                        onSearchQuery("")
+                    }) {
+                        Icon(Icons.Rounded.Close, contentDescription = "Clear search")
                     }
-                },
-                singleLine = true,
-                shape = RoundedCornerShape(18.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("library_search_input")
-            )
-        }
+                }
+            },
+            singleLine = true,
+            shape = RoundedCornerShape(18.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("library_search_input")
+        )
 
-        // Filter Chips
-        item {
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(LibraryFilter.entries) { filter ->
-                    FilterChip(
-                        selected = selectedFilter == filter,
-                        onClick = {
-                            selectedFilter = filter
-                            if (filter == LibraryFilter.DEVICE) {
-                                val permitted = SafMusicImporter.hasDeviceAudioPermission(context)
-                                hasAudioPermission = permitted
-                                if (permitted) {
-                                    onScanDeviceAudio(true)
-                                } else {
-                                    audioPermissionLauncher.launch(requiredAudioPermission)
-                                }
-                            }
-                        },
-                        label = { Text(filter.label) },
-                        modifier = Modifier.testTag("library_filter_${filter.name.lowercase()}")
-                    )
+        Spacer(Modifier.height(12.dp))
+
+        // Segmented Sliding Pill Filter Bar (All, Downloaded, Device, Shared)
+        LibrarySegmentedTabBar(
+            filters = filters,
+            selectedFilter = selectedFilter,
+            onSelectFilter = { filter ->
+                if (selectedFilter != filter) {
+                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    selectedFilter = filter
+                }
+                if (filter == LibraryFilter.DEVICE) {
+                    val permitted = SafMusicImporter.hasDeviceAudioPermission(context)
+                    hasAudioPermission = permitted
+                    if (permitted) {
+                        onScanDeviceAudio(true)
+                    } else {
+                        audioPermissionLauncher.launch(requiredAudioPermission)
+                    }
                 }
             }
-        }
+        )
 
-        if (selectedFilter == LibraryFilter.SHARED_PLAYLISTS) {
+        Spacer(Modifier.height(8.dp))
+
+        AnimatedContent(
+            targetState = selectedFilter,
+            transitionSpec = {
+                val forward = targetState.ordinal >= initialState.ordinal
+                val enterOffset: (Int) -> Int = { width ->
+                    val delta = (width * 0.045f).toInt().coerceAtLeast(1)
+                    if (forward) delta else -delta
+                }
+                val exitOffset: (Int) -> Int = { width ->
+                    val delta = (width * 0.03f).toInt().coerceAtLeast(1)
+                    if (forward) -delta else delta
+                }
+                (slideInHorizontally(
+                    animationSpec = tween(durationMillis = 85, easing = FastOutSlowInEasing),
+                    initialOffsetX = enterOffset
+                ) + fadeIn(animationSpec = tween(durationMillis = 80))) togetherWith
+                    (slideOutHorizontally(
+                        animationSpec = tween(durationMillis = 65, easing = FastOutSlowInEasing),
+                        targetOffsetX = exitOffset
+                    ) + fadeOut(animationSpec = tween(durationMillis = 55)))
+            },
+            label = "library_tab_content",
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .clipToBounds()
+                .testTag("library_filter_pager")
+        ) { pageFilter ->
+            val filteredTracks = tracksByFilter[pageFilter].orEmpty()
+            val listState = listStates.getValue(pageFilter)
+
+            LazyColumn(
+                state = listState,
+                contentPadding = PaddingValues(top = 6.dp, bottom = 140.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                if (pageFilter == LibraryFilter.SHARED) {
             if (!isSignedIn) {
                 item {
                     GoogleSignInGateCard(
@@ -341,7 +431,7 @@ fun LibraryScreen(
             }
             }
         } else {
-            if (selectedFilter == LibraryFilter.DEVICE && (hasAudioPermission || filteredTracks.isNotEmpty())) {
+            if (pageFilter == LibraryFilter.DEVICE && (hasAudioPermission || filteredTracks.isNotEmpty())) {
                 item {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -394,7 +484,7 @@ fun LibraryScreen(
             if (searchQuery.isNotBlank() &&
                 !isSearching &&
                 !searchError.isNullOrBlank() &&
-                selectedFilter == LibraryFilter.ALL
+                pageFilter == LibraryFilter.ALL
             ) {
                 item(key = "yt_search_error_banner") {
                     Surface(
@@ -437,8 +527,8 @@ fun LibraryScreen(
             }
 
             if (filteredTracks.isEmpty()) {
-                item {
-                    if (selectedFilter == LibraryFilter.DEVICE && isScanningDeviceMusic) {
+                if (pageFilter == LibraryFilter.DEVICE && isScanningDeviceMusic) {
+                    item(key = "device_scanning") {
                         ObsidianGlassCard(modifier = Modifier.fillMaxWidth()) {
                             Column(
                                 modifier = Modifier
@@ -454,7 +544,9 @@ fun LibraryScreen(
                                 )
                             }
                         }
-                    } else if (selectedFilter == LibraryFilter.DEVICE && !hasAudioPermission) {
+                    }
+                } else if (pageFilter == LibraryFilter.DEVICE && !hasAudioPermission) {
+                    item(key = "device_permission") {
                         val activity = context as? Activity
                         val showSettingsHint = permissionRequestedOnce &&
                             activity != null &&
@@ -511,7 +603,47 @@ fun LibraryScreen(
                                 }
                             }
                         }
-                    } else if (selectedFilter == LibraryFilter.DEVICE) {
+                    }
+                } else if (searchQuery.isNotBlank() && isSearching) {
+                    item(key = "search_loading_header") {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp, vertical = 4.dp)
+                                .testTag("library_searching_skeleton")
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Text(
+                                text = "Searching for \"${searchQuery.trim()}\"...",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                    items(5, key = { "search_skeleton_$it" }) { skeletonIdx ->
+                        SearchTrackSkeletonCard(index = skeletonIdx)
+                    }
+                } else if (searchQuery.isNotBlank()) {
+                    item(key = "search_no_results") {
+                        SearchNoResultsCard(
+                            query = searchQuery.trim(),
+                            filter = pageFilter,
+                            onSwitchToAll = { selectedFilter = LibraryFilter.ALL },
+                            onClearSearch = {
+                                searchQuery = ""
+                                onSearchQuery("")
+                            }
+                        )
+                    }
+                } else if (pageFilter == LibraryFilter.DEVICE) {
+                    item(key = "device_empty") {
                         ObsidianGlassCard(modifier = Modifier.fillMaxWidth()) {
                             Column(
                                 modifier = Modifier
@@ -540,7 +672,9 @@ fun LibraryScreen(
                                 )
                             }
                         }
-                    } else {
+                    }
+                } else {
+                    item(key = "library_empty_card") {
                         ObsidianGlassCard(modifier = Modifier.fillMaxWidth()) {
                             Column(
                                 modifier = Modifier.padding(20.dp),
@@ -557,18 +691,18 @@ fun LibraryScreen(
                                         .clip(RoundedCornerShape(16.dp))
                                 )
                                 Text(
-                                    text = when (selectedFilter) {
+                                    text = when (pageFilter) {
                                         LibraryFilter.DOWNLOADED -> "No downloaded songs yet"
-                                        LibraryFilter.ALL -> "No online tracks match this view"
+                                        LibraryFilter.ALL -> "No online tracks yet"
                                         else -> "No tracks match this view"
                                     },
                                     style = MaterialTheme.typography.titleLarge
                                 )
                                 Text(
-                                    text = when (selectedFilter) {
+                                    text = when (pageFilter) {
                                         LibraryFilter.DOWNLOADED -> "Tap the download button on any online song to save it here for offline playback."
                                         LibraryFilter.ALL -> "Search for any song above or play tracks from For You to populate your online library."
-                                        else -> "Import audio from your Cloud Drive in Settings, or switch to Device to browse local songs."
+                                        else -> "Switch to Device to browse local songs."
                                     },
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -578,7 +712,34 @@ fun LibraryScreen(
                     }
                 }
             } else {
-                items(filteredTracks, key = { it.id }) { track ->
+                if (searchQuery.isNotBlank() && pageFilter == LibraryFilter.ALL) {
+                    item(key = "search_live_updating") {
+                        AnimatedVisibility(visible = isSearching) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp
+                                )
+                                Text(
+                                    text = "Fetching online results...",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                    }
+                }
+                items(
+                    items = filteredTracks,
+                    key = { it.id },
+                    contentType = { "track_row" }
+                ) { track ->
                     TrackRowItem(
                         track = track,
                         isActive = activeTrack?.id == track.id,
@@ -589,6 +750,8 @@ fun LibraryScreen(
                         onShareClick = { onShareClick(track) }
                     )
                 }
+            }
+        }
             }
         }
     }
@@ -748,3 +911,257 @@ private fun CollaborativePlaylistCard(
         }
     }
 }
+
+@Composable
+private fun LibrarySegmentedTabBar(
+    filters: List<LibraryFilter>,
+    selectedFilter: LibraryFilter,
+    onSelectFilter: (LibraryFilter) -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.24f)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp)
+                .padding(horizontal = 6.dp),
+            contentAlignment = Alignment.CenterStart
+        ) {
+            val totalWeight = remember(filters) { filters.sumOf { it.widthWeight.toDouble() }.toFloat() }
+            val selectedIndex = filters.indexOf(selectedFilter).coerceAtLeast(0)
+            val weightBeforeSelected = remember(filters, selectedIndex) {
+                filters.take(selectedIndex).sumOf { it.widthWeight.toDouble() }.toFloat()
+            }
+            val targetOffset = maxWidth * (weightBeforeSelected / totalWeight)
+            val targetWidth = maxWidth * (filters[selectedIndex].widthWeight / totalWeight)
+
+            val indicatorOffset by animateDpAsState(
+                targetValue = targetOffset,
+                animationSpec = tween(durationMillis = 85, easing = FastOutSlowInEasing),
+                label = "library_tab_indicator_offset"
+            )
+            val indicatorWidth by animateDpAsState(
+                targetValue = targetWidth,
+                animationSpec = tween(durationMillis = 85, easing = FastOutSlowInEasing),
+                label = "library_tab_indicator_width"
+            )
+
+            Box(
+                modifier = Modifier
+                    .offset(x = indicatorOffset)
+                    .width(indicatorWidth)
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(MaterialTheme.colorScheme.secondaryContainer)
+                    .border(
+                        width = 1.dp,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.40f),
+                        shape = RoundedCornerShape(18.dp)
+                    )
+            )
+
+            Row(
+                modifier = Modifier.fillMaxSize(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                filters.forEach { filter ->
+                    val isSelected = selectedFilter == filter
+                    val labelColor by animateColorAsState(
+                        targetValue = if (isSelected) {
+                            MaterialTheme.colorScheme.onSecondaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        animationSpec = tween(durationMillis = 70),
+                        label = "library_tab_label_${filter.name}"
+                    )
+
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .weight(filter.widthWeight)
+                            .height(56.dp)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) { onSelectFilter(filter) }
+                            .testTag("library_filter_${filter.name.lowercase()}")
+                    ) {
+                        Text(
+                            text = filter.label,
+                            style = MaterialTheme.typography.labelLarge.copy(
+                                fontSize = 13.5.sp,
+                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium
+                            ),
+                            color = labelColor,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchTrackSkeletonCard(index: Int) {
+    val infiniteTransition = rememberInfiniteTransition(label = "search_skeleton_shimmer")
+    val progress by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1250, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "search_shimmer_progress"
+    )
+    val baseColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+    val highlightColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
+    val sweepStart = (progress * 900f) - 300f - (index * 45f)
+    val shimmerBrush = Brush.linearGradient(
+        colors = listOf(baseColor, highlightColor, baseColor),
+        start = Offset(sweepStart, 0f),
+        end = Offset(sweepStart + 280f, 180f)
+    )
+    val titleFractions = listOf(0.76f, 0.62f, 0.84f, 0.68f, 0.72f)
+    val artistFractions = listOf(0.46f, 0.54f, 0.40f, 0.50f, 0.44f)
+
+    ObsidianGlassCard(
+        modifier = Modifier.fillMaxWidth(),
+        cornerRadius = 20.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(54.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(shimmerBrush)
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(titleFractions[index % titleFractions.size])
+                        .height(14.dp)
+                        .clip(RoundedCornerShape(7.dp))
+                        .background(shimmerBrush)
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(artistFractions[index % artistFractions.size])
+                        .height(11.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(shimmerBrush)
+                )
+                Box(
+                    modifier = Modifier
+                        .width(52.dp)
+                        .height(16.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(shimmerBrush)
+                )
+            }
+            Spacer(Modifier.width(10.dp))
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .background(shimmerBrush)
+            )
+            Spacer(Modifier.width(8.dp))
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .background(shimmerBrush)
+            )
+        }
+    }
+}
+
+@Composable
+private fun SearchNoResultsCard(
+    query: String,
+    filter: LibraryFilter,
+    onSwitchToAll: () -> Unit,
+    onClearSearch: () -> Unit
+) {
+    ObsidianGlassCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("library_search_no_results")
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(54.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f))
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.SearchOff,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.size(26.dp)
+                )
+            }
+            Text(
+                text = "No matches for \"$query\"",
+                style = MaterialTheme.typography.titleMedium,
+                textAlign = TextAlign.Center
+            )
+            Text(
+                text = when (filter) {
+                    LibraryFilter.ALL -> "Try another song title, artist name, or paste a YouTube link."
+                    LibraryFilter.DOWNLOADED -> "None of your downloaded tracks match this search."
+                    LibraryFilter.DEVICE -> "No local audio files on your device match this search."
+                    LibraryFilter.SHARED -> "Switch to All to search the catalog."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (filter != LibraryFilter.ALL) {
+                    Button(
+                        onClick = onSwitchToAll,
+                        modifier = Modifier.height(48.dp)
+                    ) {
+                        Text("Search in All")
+                    }
+                }
+                OutlinedButton(
+                    onClick = onClearSearch,
+                    modifier = Modifier.height(48.dp)
+                ) {
+                    Text("Clear Search")
+                }
+            }
+        }
+    }
+}
+

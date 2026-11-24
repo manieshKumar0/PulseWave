@@ -176,6 +176,7 @@ class PulseViewModel(
         viewModelScope.launch {
             prefsRepo.settingsFlow.collect { current ->
                 playbackController.setCrossfadeSeconds(current.crossfadeSeconds)
+                playbackController.setSmartFadeOutEnabled(current.smartFadeOutEnabled)
                 youTubeClient.preferHighQuality = current.highResStreaming
                 val syncSource = if (!hasLoggedInitialAuthSync) "prefs_startup_restore" else "prefs_update"
                 youTubeClient.setYouTubeAuthSession(
@@ -1137,6 +1138,48 @@ class PulseViewModel(
         val clamped = seconds.coerceIn(0, 12)
         playbackController.setCrossfadeSeconds(clamped)
         viewModelScope.launch { prefsRepo.setCrossfadeSeconds(clamped) }
+    }
+
+    fun setSmartFadeOut(enabled: Boolean) {
+        playbackController.setSmartFadeOutEnabled(enabled)
+        viewModelScope.launch { prefsRepo.setSmartFadeOut(enabled) }
+    }
+
+    fun setVisualizerStyleIndex(index: Int) {
+        viewModelScope.launch { prefsRepo.setVisualizerStyleIndex(index.coerceIn(0, 2)) }
+    }
+
+    fun setVisualizerLayout(
+        heightDp: Int,
+        verticalPaddingDp: Int,
+        horizontalPaddingDp: Int
+    ) {
+        viewModelScope.launch {
+            prefsRepo.setVisualizerLayout(
+                heightDp = heightDp,
+                verticalPaddingDp = verticalPaddingDp,
+                horizontalPaddingDp = horizontalPaddingDp
+            )
+        }
+    }
+
+    fun setVisualizerTuning(
+        particleMotionScale: Float,
+        intensityScale: Float
+    ) {
+        viewModelScope.launch {
+            prefsRepo.setVisualizerTuning(
+                particleMotionScale = particleMotionScale,
+                intensityScale = intensityScale
+            )
+        }
+    }
+
+    fun resetVisualizerSettings() {
+        viewModelScope.launch {
+            prefsRepo.resetVisualizerSettings()
+            _statusMessage.value = "Visualizer reset to Neon Skyline default"
+        }
     }
 
     fun startSleepTimer(minutes: Int) {

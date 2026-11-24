@@ -107,6 +107,7 @@ import com.example.ui.screens.PulseRoomScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.SocialGuestGateScreen
 import com.example.ui.screens.SocialHubScreen
+import com.example.ui.screens.VisualizerSettingsScreen
 import com.example.ui.theme.PulseWaveTheme
 import com.example.ui.viewmodel.PulseViewModel
 import com.example.ui.viewmodel.SocialViewModel
@@ -123,6 +124,7 @@ import kotlin.math.abs
 
 @Serializable data object HomeTabsRoute
 @Serializable data class PulseRoomRoute(val roomId: String)
+@Serializable data object VisualizerStudioRoute
 
 private data class MainTabSpec(
     val label: String,
@@ -457,7 +459,13 @@ private fun AuthenticatedPulseApp(
             modifier = Modifier
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background)
-                .dynamicAmbientGlow(glowColor, MaterialTheme.colorScheme.secondary, intensity = 0.18f)
+                .then(
+                    if (settings.dynamicAlbumGlow) {
+                        Modifier.dynamicAmbientGlow(glowColor, MaterialTheme.colorScheme.secondary, intensity = 0.18f)
+                    } else {
+                        Modifier
+                    }
+                )
         ) {
             val isExpandedScreen = maxWidth >= 840.dp
 
@@ -471,9 +479,11 @@ private fun AuthenticatedPulseApp(
             }
             val pagerState = rememberPagerState(initialPage = 0, pageCount = { tabItems.size })
             val isOnRoomRoute = currentDestination?.hasRoute(PulseRoomRoute::class) == true
+            val isOnVisualizerRoute = currentDestination?.hasRoute(VisualizerStudioRoute::class) == true
+            val isOnSubRoute = isOnRoomRoute || isOnVisualizerRoute
 
             fun selectTab(index: Int) {
-                if (isOnRoomRoute) {
+                if (isOnSubRoute) {
                     navController.popBackStack<HomeTabsRoute>(inclusive = false)
                 }
                 if (pagerState.currentPage == index) return
@@ -490,7 +500,7 @@ private fun AuthenticatedPulseApp(
                 }
             }
 
-            BackHandler(enabled = !isOnRoomRoute && !showNowPlaying && pagerState.currentPage != 0) {
+            BackHandler(enabled = !isOnSubRoute && !showNowPlaying && pagerState.currentPage != 0) {
                 selectTab(0)
             }
 
@@ -500,13 +510,13 @@ private fun AuthenticatedPulseApp(
                 contentWindowInsets = WindowInsets(0, 0, 0, 0),
                 snackbarHost = { SnackbarHost(snackbarHostState) },
                 bottomBar = {
-                    if (!isExpandedScreen && !isOnRoomRoute) {
+                    if (!isExpandedScreen && !isOnSubRoute) {
                         NavigationBar(
                             windowInsets = WindowInsets.navigationBars,
                             containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f)
                         ) {
                             tabItems.forEachIndexed { index, tab ->
-                                val selected = !isOnRoomRoute && pagerState.targetPage == index
+                                val selected = !isOnSubRoute && pagerState.targetPage == index
                                 NavigationBarItem(
                                     selected = selected,
                                     onClick = { selectTab(index) },
@@ -524,7 +534,7 @@ private fun AuthenticatedPulseApp(
                         .fillMaxSize()
                         .padding(innerPadding)
                 ) {
-                    if (isExpandedScreen && !isOnRoomRoute) {
+                    if (isExpandedScreen && !isOnSubRoute) {
                         NavigationRail(
                             containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
                             header = {
@@ -535,7 +545,7 @@ private fun AuthenticatedPulseApp(
                             }
                         ) {
                             tabItems.forEachIndexed { index, tab ->
-                                val selected = !isOnRoomRoute && pagerState.targetPage == index
+                                val selected = !isOnSubRoute && pagerState.targetPage == index
                                 NavigationRailItem(
                                     selected = selected,
                                     onClick = { selectTab(index) },
@@ -736,6 +746,7 @@ private fun AuthenticatedPulseApp(
                                                     onToggleOfflineMode = { pulseViewModel.setOfflineMode(it) },
                                                     onToggleHighResStreaming = { pulseViewModel.setHighResStreaming(it) },
                                                     onCrossfadeSecondsChange = { pulseViewModel.setCrossfadeSeconds(it) },
+                                                    onToggleSmartFadeOut = { pulseViewModel.setSmartFadeOut(it) },
                                                     onToggleEqEnabled = { pulseViewModel.setEqualizerEnabled(it) },
                                                     onSelectEqPreset = { pulseViewModel.applySoundscapePreset(it) },
                                                     onUpdateEqBand = { idx, mb -> pulseViewModel.updateEqualizerBand(idx, mb) },
@@ -747,6 +758,7 @@ private fun AuthenticatedPulseApp(
                                                     onCancelSleepTimer = { pulseViewModel.cancelSleepTimer() },
                                                     onSelectThemeMode = { pulseViewModel.setThemeMode(it) },
                                                     onToggleDynamicGlow = { pulseViewModel.setDynamicAlbumGlow(it) },
+                                                    onOpenVisualizerSettings = { navController.navigate(VisualizerStudioRoute) },
                                                     onImportSafAudio = { uris, isCloud -> pulseViewModel.importSafAudio(uris, isCloud) },
                                                     onSyncLocalLyrics = { pulseViewModel.syncLocalTracksMetadataAndLyrics() },
                                                     onClearMetadataCache = { pulseViewModel.clearMetadataCache() },
@@ -802,10 +814,28 @@ private fun AuthenticatedPulseApp(
                                     onSendReaction = { emoji -> socialViewModel?.sendRoomReaction(route.roomId, emoji) }
                                 )
                             }
+
+                            composable<VisualizerStudioRoute> {
+                                val studioPlaybackState by pulseViewModel.playbackState.collectAsStateWithLifecycle()
+                                VisualizerSettingsScreen(
+                                    settings = settings,
+                                    playbackState = studioPlaybackState,
+                                    albumAccent = albumAccent,
+                                    onSelectVisualizerStyle = { pulseViewModel.setVisualizerStyleIndex(it) },
+                                    onUpdateVisualizerLayout = { h, vPad, hPad ->
+                                        pulseViewModel.setVisualizerLayout(h, vPad, hPad)
+                                    },
+                                    onUpdateVisualizerTuning = { motion, intensity ->
+                                        pulseViewModel.setVisualizerTuning(motion, intensity)
+                                    },
+                                    onResetVisualizerSettings = { pulseViewModel.resetVisualizerSettings() },
+                                    onBack = { navController.popBackStack() }
+                                )
+                            }
                         }
 
                         // Persistent MiniPlayer anchored cleanly above navigation bar (isolated from tab pager state)
-                        if (activeTrack != null && !showNowPlaying && !isOnRoomRoute) {
+                        if (activeTrack != null && !showNowPlaying && !isOnSubRoute) {
                             LiveMiniPlayerOverlay(
                                 playbackStateFlow = pulseViewModel.playbackState,
                                 onTogglePlay = { pulseViewModel.playbackController.togglePlayPause() },
@@ -829,9 +859,15 @@ private fun AuthenticatedPulseApp(
                     isLoadingLyrics = isLoadingLyrics,
                     aiTrackStory = aiTrackStory,
                     lyricNotes = activeLyricNotes,
-                    sonicDna = sonicDna,
                     albumAccent = albumAccent,
+                    dynamicGlowEnabled = settings.dynamicAlbumGlow,
                     downloadProgress = downloadProgress[nowPlayingState.currentTrack?.id],
+                    visualizerStyleIndex = settings.visualizerStyleIndex,
+                    visualizerHeightDp = settings.visualizerHeightDp,
+                    visualizerVerticalPaddingDp = settings.visualizerVerticalPaddingDp,
+                    visualizerHorizontalPaddingDp = settings.visualizerHorizontalPaddingDp,
+                    visualizerParticleMotionScale = settings.visualizerParticleMotionScale,
+                    visualizerIntensityScale = settings.visualizerIntensityScale,
                     activePulseRoom = joinedPulseRoom,
                     currentUserId = uid,
                     isSignedIn = isSignedIn,
