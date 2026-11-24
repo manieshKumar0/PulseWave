@@ -926,13 +926,6 @@ private fun AuthenticatedPulseApp(
                             pendingSignInFeature = "shared lyric notes"
                         }
                     },
-                    onApplyPreset = { pulseViewModel.applySoundscapePreset(it) },
-                    onMorphSoundscape = { from, to, fraction ->
-                        pulseViewModel.playbackController.morphSoundscape(from, to, fraction)
-                    },
-                    onUpdateBand = { idx, mb -> pulseViewModel.updateEqualizerBand(idx, mb) },
-                    onUpdateBassBoost = { pulseViewModel.updateBassBoost(it) },
-                    onUpdateReverbPreset = { pulseViewModel.updateReverbPreset(it) },
                     onPlayQueueTrack = { selected ->
                         pulseViewModel.playTrack(selected, nowPlayingState.queue.ifEmpty { listOf(selected) })
                     },

@@ -60,7 +60,6 @@ import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -72,13 +71,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -102,11 +98,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.media3.common.Player
-import com.example.data.model.DefaultSoundscapes
 import com.example.data.model.LyricLine
 import com.example.data.model.LyricNoteDoc
 import com.example.data.model.PulseRoomDoc
-import com.example.data.model.SoundscapePreset
 import com.example.data.model.Track
 import com.example.data.model.UserProfile
 import com.example.data.remote.YouTubeMusicClient
@@ -129,7 +123,6 @@ import com.example.ui.theme.MintElectric
 import com.example.ui.theme.PlayfairDisplayFontFamily
 import com.example.ui.theme.UltravioletPulse
 import com.example.ui.viewmodel.UiState
-import kotlin.math.roundToInt
 
 @Composable
 fun NowPlayingScreen(
@@ -170,11 +163,6 @@ fun NowPlayingScreen(
     onRetryLyrics: (Track, String?, String?) -> Unit = { _, _, _ -> },
     onGenerateAiStory: (Track) -> Unit,
     onAddLyricNote: (Track, Long, String) -> Unit,
-    onApplyPreset: (SoundscapePreset) -> Unit,
-    onMorphSoundscape: (SoundscapePreset, SoundscapePreset, Float) -> Unit,
-    onUpdateBand: (Int, Int) -> Unit,
-    onUpdateBassBoost: (Int) -> Unit,
-    onUpdateReverbPreset: (Int) -> Unit,
     onPlayQueueTrack: (Track) -> Unit = {},
     onStartSleepTimer: (Int) -> Unit = {},
     onCancelSleepTimer: () -> Unit = {}
@@ -200,7 +188,7 @@ fun NowPlayingScreen(
     var showCreateRoomDialog by remember { mutableStateOf(false) }
     var showQueueSheet by remember { mutableStateOf(false) }
     var showSleepTimerSheet by remember { mutableStateOf(false) }
-    val studioTabs = listOf("Player", "Lyrics", "Soundscape")
+    val studioTabs = listOf("Player", "Lyrics")
 
     Box(
         modifier = Modifier
@@ -369,7 +357,7 @@ fun NowPlayingScreen(
                 onConnectYouTube = onConnectYouTube,
                 onRetryPlayback = onRetryPlayback
             )
-            1 -> LyricCanvasTab(
+            else -> LyricCanvasTab(
                 track = track,
                 playbackState = playbackState,
                 parsedLyrics = parsedLyrics,
@@ -389,14 +377,6 @@ fun NowPlayingScreen(
                 },
                 onGenerateAiStory = { onGenerateAiStory(track) },
                 onAddLyricNote = { note -> onAddLyricNote(track, playbackState.positionMs, note) }
-            )
-            else -> SoundscapeLabTab(
-                playbackState = playbackState,
-                onApplyPreset = onApplyPreset,
-                onMorphSoundscape = onMorphSoundscape,
-                onUpdateBand = onUpdateBand,
-                onUpdateBassBoost = onUpdateBassBoost,
-                onUpdateReverbPreset = onUpdateReverbPreset
             )
         }
     }
@@ -1042,131 +1022,6 @@ private fun LyricCanvasTab(
                             .testTag("lyric_notes_sign_in_button")
                     ) {
                         Text("Sign in")
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SoundscapeLabTab(
-    playbackState: PlaybackUiState,
-    onApplyPreset: (SoundscapePreset) -> Unit,
-    onMorphSoundscape: (SoundscapePreset, SoundscapePreset, Float) -> Unit,
-    onUpdateBand: (Int, Int) -> Unit,
-    onUpdateBassBoost: (Int) -> Unit,
-    onUpdateReverbPreset: (Int) -> Unit
-) {
-    val presets = DefaultSoundscapes.presets
-    var morphFrom by remember { mutableStateOf(presets.first()) }
-    var morphTo by remember { mutableStateOf(presets.getOrElse(1) { presets.first() }) }
-    var morphFraction by remember { mutableFloatStateOf(0f) }
-
-    val bandLabels = DefaultSoundscapes.bandLabels
-    val reverbLabels = DefaultSoundscapes.reverbLabels
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        Text("Soundscape Presets", style = MaterialTheme.typography.titleLarge)
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(presets, key = { it.id }) { preset ->
-                FilterChip(
-                    selected = playbackState.activeSoundscape.id == preset.id,
-                    onClick = { onApplyPreset(preset) },
-                    label = { Text(preset.name) },
-                    modifier = Modifier.testTag("soundscape_preset_${preset.id}")
-                )
-            }
-        }
-
-        ObsidianGlassCard(modifier = Modifier.fillMaxWidth(), cornerRadius = 20.dp, accentTint = MintElectric) {
-            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Live Soundscape Morph", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    text = "Cross-morph DSP EQ & bass in real time between ${morphFrom.name} → ${morphTo.name}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    items(presets) { p ->
-                        FilterChip(
-                            selected = morphTo.id == p.id,
-                            onClick = {
-                                morphFrom = playbackState.activeSoundscape
-                                morphTo = p
-                                onMorphSoundscape(morphFrom, morphTo, morphFraction)
-                            },
-                            label = { Text("To: ${p.name}") }
-                        )
-                    }
-                }
-                Slider(
-                    value = morphFraction,
-                    onValueChange = {
-                        morphFraction = it
-                        onMorphSoundscape(morphFrom, morphTo, it)
-                    },
-                    valueRange = 0f..1f,
-                    modifier = Modifier.fillMaxWidth().testTag("soundscape_morph_slider")
-                )
-                Text(
-                    text = "Morph Blend: ${(morphFraction * 100).roundToInt()}%",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            }
-        }
-
-        ObsidianGlassCard(modifier = Modifier.fillMaxWidth(), cornerRadius = 20.dp) {
-            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("5-Band Parametric Rack", style = MaterialTheme.typography.titleMedium)
-                playbackState.bandLevels.forEachIndexed { idx, millibels ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = bandLabels.getOrElse(idx) { "B$idx" },
-                            style = MaterialTheme.typography.labelMedium,
-                            modifier = Modifier.width(52.dp)
-                        )
-                        Slider(
-                            value = millibels.toFloat(),
-                            onValueChange = { onUpdateBand(idx, it.roundToInt()) },
-                            valueRange = -1500f..1500f,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Text(
-                            text = "${millibels / 100}dB",
-                            style = MaterialTheme.typography.labelSmall,
-                            modifier = Modifier.width(44.dp),
-                            textAlign = TextAlign.End
-                        )
-                    }
-                }
-
-                Text("Sub-Bass Boost (${playbackState.bassBoost / 10}%)", style = MaterialTheme.typography.labelLarge)
-                Slider(
-                    value = playbackState.bassBoost.toFloat(),
-                    onValueChange = { onUpdateBassBoost(it.roundToInt()) },
-                    valueRange = 0f..1000f,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Text("Spatial Reverb", style = MaterialTheme.typography.labelLarge)
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    itemsIndexed(reverbLabels) { idx, label ->
-                        FilterChip(
-                            selected = playbackState.reverbPreset == idx,
-                            onClick = { onUpdateReverbPreset(idx) },
-                            label = { Text(label) }
-                        )
                     }
                 }
             }
