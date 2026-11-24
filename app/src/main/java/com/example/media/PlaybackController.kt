@@ -367,9 +367,10 @@ class PlaybackController internal constructor(
                                     }
                                 } else if (stream == null) {
                                     val rawErr = resolved.exceptionOrNull()
-                                    val errMsg = rawErr?.message
-                                        ?.takeIf { it.isNotBlank() }
-                                        ?: "Audio stream unavailable"
+                                    val errMsg = YouTubeMusicClient.humanReadablePlaybackError(
+                                        error = rawErr,
+                                        isYouTubeTrack = true
+                                    )
                                     val timedOut = rawErr is SocketTimeoutException || rawErr?.cause is SocketTimeoutException
                                     val httpStatus = YouTubeMusicClient.extractHttpStatus(rawErr)
                                     val origin = YouTubeMusicClient.classifyFailureOrigin(rawErr, timedOut = timedOut)
@@ -441,17 +442,11 @@ class PlaybackController internal constructor(
                     ?: error.localizedMessage
                     ?: "Audio stream unavailable"
 
-                val httpStatusMatch = Regex("\\b(?:401|402|403|429)\\b")
                 val isYouTubeTrack = _state.value.currentTrack?.youtubeVideoId != null
-                val formattedPlayerError = if (
-                    isYouTubeTrack &&
-                    (httpStatusMatch.containsMatchIn(rawRootMessage) ||
-                        rawRootMessage.startsWith("Response code:", ignoreCase = true))
-                ) {
-                    YouTubeMusicClient.humanReadableExtractionError(rootCause ?: error)
-                } else {
-                    rawRootMessage
-                }
+                val formattedPlayerError = YouTubeMusicClient.humanReadablePlaybackError(
+                    error = rootCause ?: error,
+                    isYouTubeTrack = isYouTubeTrack
+                )
 
                 val nonRetryableYouTubeRejection = Regex("\\b(?:402|429)\\b").containsMatchIn(formattedPlayerError) ||
                     YouTubeMusicClient.isYouTubeSignInSuggestionError(formattedPlayerError) ||
@@ -540,9 +535,14 @@ class PlaybackController internal constructor(
                                 }
                             }
                             val rawRetryErr = resolved.exceptionOrNull()
-                            val errMsg = rawRetryErr?.message
-                                ?.takeIf { it.isNotBlank() }
-                                ?: formattedPlayerError
+                            val errMsg = if (rawRetryErr != null) {
+                                YouTubeMusicClient.humanReadablePlaybackError(
+                                    error = rawRetryErr,
+                                    isYouTubeTrack = true
+                                )
+                            } else {
+                                formattedPlayerError
+                            }
                             Log.w(
                                 "PULSE_YT_RESOLVER",
                                 "stage_event corr=$retryCorrId stage=PLAYBACK_RETRY_FAIL videoId=$activeVideoId startTsMs=$retryStartTsMs endTsMs=$retryEndTsMs durationMs=$retryElapsedMs outcome=FAILURE errorClass=${rawRetryErr?.javaClass?.simpleName ?: "None"} httpStatus=${YouTubeMusicClient.extractHttpStatus(rawRetryErr)} failureOrigin=${YouTubeMusicClient.classifyFailureOrigin(rawRetryErr)} phase=BEFORE_MEDIA3_HANDOFF msg=${YouTubeMusicClient.redactSensitiveUrls(errMsg)}"
@@ -1019,9 +1019,10 @@ class PlaybackController internal constructor(
                 val stream = resolved.getOrNull()
                 if (stream == null) {
                     val rawErr = resolved.exceptionOrNull()
-                    val errMsg = rawErr?.message
-                        ?.takeIf { it.isNotBlank() }
-                        ?: "Audio stream unavailable"
+                    val errMsg = YouTubeMusicClient.humanReadablePlaybackError(
+                        error = rawErr,
+                        isYouTubeTrack = true
+                    )
                     val timedOut = rawErr is SocketTimeoutException || rawErr?.cause is SocketTimeoutException
                     val httpStatus = YouTubeMusicClient.extractHttpStatus(rawErr)
                     val origin = YouTubeMusicClient.classifyFailureOrigin(rawErr, timedOut = timedOut)

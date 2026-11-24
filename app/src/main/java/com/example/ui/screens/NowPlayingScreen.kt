@@ -58,6 +58,7 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.DownloadDone
 import androidx.compose.material.icons.rounded.Equalizer
+import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.GraphicEq
@@ -75,6 +76,7 @@ import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
+import androidx.compose.material.icons.rounded.WifiOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -776,43 +778,98 @@ private fun PlayerTab(
             )
         }
 
-        if (playbackState.playbackError != null) {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+        AnimatedVisibility(
+            visible = playbackState.playbackError != null,
+            enter = fadeIn(tween(180)) + expandVertically(),
+            exit = fadeOut(tween(140)) + shrinkVertically()
+        ) {
+            val errorText = playbackState.playbackError.orEmpty()
+            val isConnectivityIssue = errorText.contains("offline", ignoreCase = true) ||
+                errorText.contains("Network error", ignoreCase = true) ||
+                errorText.contains("timed out", ignoreCase = true) ||
+                errorText.contains("connection", ignoreCase = true)
+            val needsSignIn = YouTubeMusicClient.isYouTubeSignInSuggestionError(errorText)
+
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.78f),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.28f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("now_playing_error_banner")
             ) {
-                Text(
-                    text = playbackState.playbackError,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.error
-                )
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    if (YouTubeMusicClient.isYouTubeSignInSuggestionError(playbackState.playbackError)) {
-                        Button(
-                            onClick = onConnectYouTube,
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.error.copy(alpha = 0.14f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = if (isConnectivityIssue) Icons.Rounded.WifiOff else Icons.Rounded.ErrorOutline,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        Text(
+                            text = errorText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (needsSignIn) {
+                            Button(
+                                onClick = onConnectYouTube,
+                                shape = RoundedCornerShape(999.dp),
+                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                                modifier = Modifier
+                                    .height(48.dp)
+                                    .testTag("now_playing_connect_youtube_button")
+                            ) {
+                                Text("Connect YouTube")
+                            }
+                        }
+                        OutlinedButton(
+                            onClick = onRetryPlayback,
+                            shape = RoundedCornerShape(999.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.45f)),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                             modifier = Modifier
                                 .height(48.dp)
-                                .testTag("now_playing_connect_youtube_button")
+                                .testTag("now_playing_retry_button")
                         ) {
-                            Text("Connect YouTube")
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = "Retry",
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
                         }
-                    }
-                    OutlinedButton(
-                        onClick = onRetryPlayback,
-                        modifier = Modifier
-                            .height(48.dp)
-                            .testTag("now_playing_retry_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Refresh,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text("Retry")
                     }
                 }
             }

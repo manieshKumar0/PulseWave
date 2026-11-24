@@ -147,6 +147,7 @@ class PulseViewModel(
 
     private var lastLoadedTrackId: String? = null
     private var lastReportedError: String? = null
+    private var isNowPlayingOpen: Boolean = false
     private var lastMoodPrompt: String? = null
     private var latestFriendPosts: List<FeedPostDoc> = emptyList()
     private val searchSeq = java.util.concurrent.atomic.AtomicLong(0L)
@@ -250,14 +251,26 @@ class PulseViewModel(
         }
     }
 
+    fun setNowPlayingVisible(visible: Boolean) {
+        isNowPlayingOpen = visible
+        if (visible && _statusMessage.value != null && _statusMessage.value == lastReportedError) {
+            _statusMessage.value = null
+        }
+    }
+
     private fun observeActiveTrackChanges() {
         viewModelScope.launch {
             playbackState.collect { state ->
                 val err = state.playbackError
                 if (!err.isNullOrBlank() && err != lastReportedError) {
                     lastReportedError = err
-                    _statusMessage.value = err
+                    if (!isNowPlayingOpen) {
+                        _statusMessage.value = err
+                    }
                 } else if (err.isNullOrBlank()) {
+                    if (_statusMessage.value != null && _statusMessage.value == lastReportedError) {
+                        _statusMessage.value = null
+                    }
                     lastReportedError = null
                 }
 
@@ -382,7 +395,12 @@ class PulseViewModel(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _discoveryState.value = UiState.Error(e.localizedMessage ?: "Failed to build recommendations")
+                _discoveryState.value = UiState.Error(
+                    YouTubeMusicClient.humanReadableError(
+                        error = e,
+                        fallback = "Couldn't load your personalized feed right now."
+                    )
+                )
             }
         }
     }
@@ -628,7 +646,10 @@ class PulseViewModel(
                 throw e
             } catch (e: Exception) {
                 _activeMoodMix.value = null
-                _statusMessage.value = e.localizedMessage ?: "Couldn't start $cleanTitle mix"
+                _statusMessage.value = YouTubeMusicClient.humanReadableError(
+                    error = e,
+                    fallback = "Couldn't start $cleanTitle mix."
+                )
             }
         }
     }
@@ -696,7 +717,10 @@ class PulseViewModel(
                 syncTrackStateAcrossUi(saved)
                 _statusMessage.value = "Saved \"${saved.title}\" to Downloaded"
             }.onFailure { err ->
-                _statusMessage.value = err.localizedMessage ?: "Download failed"
+                _statusMessage.value = YouTubeMusicClient.humanReadablePlaybackError(
+                    error = err,
+                    isYouTubeTrack = track.youtubeVideoId != null
+                )
             }
         }
     }
@@ -1034,7 +1058,14 @@ class PulseViewModel(
             val res = recommendationEngine.generateTrackVibeStory(track)
             _aiTrackStory.value = res.fold(
                 onSuccess = { UiState.Success(it) },
-                onFailure = { UiState.Error(it.localizedMessage ?: "AI story unavailable") }
+                onFailure = {
+                    UiState.Error(
+                        YouTubeMusicClient.humanReadableError(
+                            error = it,
+                            fallback = "Track story is unavailable right now."
+                        )
+                    )
+                }
             )
         }
     }

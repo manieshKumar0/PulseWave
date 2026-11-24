@@ -13,7 +13,9 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -23,25 +25,35 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.WifiOff
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -59,6 +71,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.credentials.CredentialManager
@@ -419,17 +432,32 @@ private fun AuthenticatedPulseApp(
         }
     }
 
+    LaunchedEffect(showNowPlaying) {
+        pulseViewModel.setNowPlayingVisible(showNowPlaying)
+        if (showNowPlaying) {
+            snackbarHostState.currentSnackbarData?.dismiss()
+        }
+    }
+
     LaunchedEffect(statusMessage) {
-        statusMessage?.let {
-            snackbarHostState.showSnackbar(it)
+        statusMessage?.let { msg ->
+            snackbarHostState.currentSnackbarData?.dismiss()
             pulseViewModel.clearStatusMessage()
+            snackbarHostState.showSnackbar(
+                message = msg,
+                duration = SnackbarDuration.Short
+            )
         }
     }
 
     LaunchedEffect(socialNotice) {
-        socialNotice?.let {
-            snackbarHostState.showSnackbar(it)
+        socialNotice?.let { msg ->
+            snackbarHostState.currentSnackbarData?.dismiss()
             socialViewModel.clearNotice()
+            snackbarHostState.showSnackbar(
+                message = msg,
+                duration = SnackbarDuration.Short
+            )
         }
     }
 
@@ -504,11 +532,98 @@ private fun AuthenticatedPulseApp(
                 selectTab(0)
             }
 
+            val hasFloatingMiniPlayer = activeTrack != null && !showNowPlaying && !isOnSubRoute
+
             Scaffold(
                 containerColor = Color.Transparent,
                 contentColor = MaterialTheme.colorScheme.onBackground,
                 contentWindowInsets = WindowInsets(0, 0, 0, 0),
-                snackbarHost = { SnackbarHost(snackbarHostState) },
+                snackbarHost = {
+                    SnackbarHost(
+                        hostState = snackbarHostState,
+                        modifier = Modifier
+                            .padding(
+                                start = 14.dp,
+                                end = 14.dp,
+                                bottom = if (hasFloatingMiniPlayer) 84.dp else 8.dp
+                            )
+                            .widthIn(max = 560.dp)
+                    ) { data ->
+                        val msg = data.visuals.message
+                        val isConnectivity = msg.contains("offline", ignoreCase = true) ||
+                            msg.contains("Network error", ignoreCase = true) ||
+                            msg.contains("timed out", ignoreCase = true)
+                        val isError = isConnectivity ||
+                            msg.contains("failed", ignoreCase = true) ||
+                            msg.contains("couldn't", ignoreCase = true) ||
+                            msg.contains("unavailable", ignoreCase = true) ||
+                            msg.contains("rejected", ignoreCase = true) ||
+                            msg.contains("denied", ignoreCase = true) ||
+                            msg.contains("expired", ignoreCase = true) ||
+                            msg.contains("could not", ignoreCase = true)
+                        val containerColor = if (isError) {
+                            MaterialTheme.colorScheme.errorContainer
+                        } else {
+                            MaterialTheme.colorScheme.inverseSurface
+                        }
+                        val contentColor = if (isError) {
+                            MaterialTheme.colorScheme.onErrorContainer
+                        } else {
+                            MaterialTheme.colorScheme.inverseOnSurface
+                        }
+                        val borderColor = if (isError) {
+                            MaterialTheme.colorScheme.error.copy(alpha = 0.28f)
+                        } else {
+                            MaterialTheme.colorScheme.outline.copy(alpha = 0.22f)
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(18.dp),
+                            color = containerColor,
+                            contentColor = contentColor,
+                            tonalElevation = 6.dp,
+                            shadowElevation = 6.dp,
+                            border = BorderStroke(1.dp, borderColor)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = 14.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = when {
+                                        isConnectivity -> Icons.Rounded.WifiOff
+                                        isError -> Icons.Rounded.ErrorOutline
+                                        else -> Icons.Rounded.Info
+                                    },
+                                    contentDescription = null,
+                                    tint = if (isError) MaterialTheme.colorScheme.error else contentColor.copy(alpha = 0.85f),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    text = msg,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = contentColor,
+                                    maxLines = 3,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(
+                                    onClick = { data.dismiss() },
+                                    modifier = Modifier.minimumInteractiveComponentSize()
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Close,
+                                        contentDescription = "Dismiss notification",
+                                        tint = contentColor.copy(alpha = 0.8f),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                },
                 bottomBar = {
                     if (!isExpandedScreen && !isOnSubRoute) {
                         NavigationBar(

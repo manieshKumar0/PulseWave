@@ -58,10 +58,12 @@ import java.io.IOException
 import java.net.ConnectException
 import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.net.UnknownHostException
+import java.net.UnknownServiceException
 import java.security.MessageDigest
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
@@ -2234,10 +2236,37 @@ class YouTubeMusicClient internal constructor(
             return PAID_PREMIUM_REGEX.containsMatchIn(message)
         }
 
-        private fun isNetworkConnectivityError(error: Throwable?): Boolean {
-            return findCause<UnknownHostException>(error) != null ||
+        private val TECHNICAL_NETWORK_MESSAGE_REGEX = Regex(
+            "(?i)(?:unable\\s+to\\s+resolve\\s+host|no\\s+address\\s+associated\\s+with\\s+hostname|failed\\s+to\\s+connect\\s+to|connection\\s+refused|connection\\s+reset|software\\s+caused\\s+connection\\s+abort|network\\s+is\\s+unreachable|no\\s+route\\s+to\\s+host|broken\\s+pipe|cleartext|sslhandshake|chain\\s+validation\\s+failed|econnrefused|ehostunreach|enetunreach|enonet|etimedout)"
+        )
+        private val TECHNICAL_STACK_OR_URL_REGEX = Regex(
+            "(?i)(?:https?://\\S+|\\b(?:java|javax|android|okhttp3|retrofit2|androidx)\\.[a-z0-9_.]+|\\bErrnoException\\b|response\\s+code:\\s*\\d+|\\bsource\\s+error\\b|:\\d{2,5}\\b|/[0-9]{1,3}(?:\\.[0-9]{1,3}){3})"
+        )
+
+        internal fun isNetworkConnectivityError(error: Throwable?, message: String = collectExceptionMessages(error)): Boolean {
+            if (findCause<UnknownHostException>(error) != null ||
                 findCause<ConnectException>(error) != null ||
-                findCause<SSLException>(error) != null
+                findCause<SSLException>(error) != null ||
+                findCause<SocketException>(error) != null ||
+                findCause<UnknownServiceException>(error) != null
+            ) {
+                return true
+            }
+            return message.isNotBlank() && TECHNICAL_NETWORK_MESSAGE_REGEX.containsMatchIn(message)
+        }
+
+        internal fun sanitizeUserFacingDetail(raw: String, fallback: String): String {
+            val cleaned = redactSensitiveUrls(raw).trim()
+            if (cleaned.isBlank()) return fallback
+            if (TECHNICAL_NETWORK_MESSAGE_REGEX.containsMatchIn(cleaned) ||
+                TECHNICAL_STACK_OR_URL_REGEX.containsMatchIn(cleaned) ||
+                cleaned.contains("unexpected end of stream", ignoreCase = true) ||
+                cleaned.contains("stream was reset", ignoreCase = true) ||
+                cleaned.length > 160
+            ) {
+                return fallback
+            }
+            return cleaned
         }
 
         internal fun isAgeRestrictedError(error: Throwable?, message: String = error?.message.orEmpty()): Boolean {
@@ -2280,7 +2309,7 @@ class YouTubeMusicClient internal constructor(
                 findCause<ContentNotAvailableException>(error) != null ||
                     msg.contains("UNPLAYABLE", true) ||
                     msg.contains("unavailable", true) -> 70
-                isNetworkConnectivityError(error) -> 60
+                isNetworkConnectivityError(error, msg) -> 60
                 findCause<SocketTimeoutException>(error) != null -> 20
                 error != null -> 50
                 else -> 0
@@ -2295,22 +2324,84 @@ class YouTubeMusicClient internal constructor(
 
         internal fun humanReadableSearchError(error: Throwable?): String {
             val status = findCause<YouTubeHttpException>(error)?.statusCode ?: 0
-            val raw = error?.message.orEmpty()
+            val raw = error?.message.orEmpty().trim()
+            val combinedMsg = collectExceptionMessages(error).ifBlank { raw }
             return when {
-                status == 402 || HTTP_402_REGEX.containsMatchIn(raw) ->
+                status == 402 || HTTP_402_REGEX.containsMatchIn(combinedMsg) ->
                     "YouTube Music returned HTTP 402 during search (request restricted or rate-limited). Try again shortly or connect YouTube in Settings."
-                status == 429 || findCause<ReCaptchaException>(error) != null || HTTP_429_REGEX.containsMatchIn(raw) || raw.contains("reCaptcha", true) ->
+                status == 429 || findCause<ReCaptchaException>(error) != null || HTTP_429_REGEX.containsMatchIn(combinedMsg) || combinedMsg.contains("reCaptcha", true) ->
                     "YouTube Music temporarily rate-limited search (HTTP 429). Please wait a moment."
-                status == 403 || HTTP_403_REGEX.containsMatchIn(raw) ->
+                status == 403 || HTTP_403_REGEX.containsMatchIn(combinedMsg) ->
                     "YouTube Music search was rejected (HTTP 403). Try reconnecting YouTube in Settings."
-                findCause<SocketTimeoutException>(error) != null ->
-                    "YouTube Music search timed out. Check your connection and retry."
-                isNetworkConnectivityError(error) ->
-                    "Network error while searching YouTube Music. Check your internet connection and retry."
-                raw.isNotBlank() ->
-                    "YouTube Music search failed: $raw"
+                isNetworkConnectivityError(error, combinedMsg) ->
+                    "Network error while searching. Check your internet connection and retry."
+                findCause<SocketTimeoutException>(error) != null || combinedMsg.contains("timed out", ignoreCase = true) ->
+                    "Search timed out. Check your connection and retry."
+                raw.isNotBlank() -> {
+                    val safeDetail = sanitizeUserFacingDetail(
+                        raw,
+                        fallback = "Couldn't complete search right now. Check your connection and retry."
+                    )
+                    if (safeDetail == raw) "YouTube Music search failed: $safeDetail" else safeDetail
+                }
                 else ->
                     "YouTube Music search failed. Check your connection and try again."
+            }
+        }
+
+        internal fun humanReadableError(
+            error: Throwable?,
+            fallback: String = "Something went wrong. Please try again."
+        ): String {
+            val combinedMsg = collectExceptionMessages(error).ifBlank { error?.message.orEmpty().trim() }
+            return when {
+                isNetworkConnectivityError(error, combinedMsg) ->
+                    "You're offline or having trouble connecting. Check your internet and try again."
+                findCause<SocketTimeoutException>(error) != null || combinedMsg.contains("timed out", ignoreCase = true) ->
+                    "Connection timed out. Check your internet and try again."
+                else -> sanitizeUserFacingDetail(error?.message.orEmpty(), fallback)
+            }
+        }
+
+        internal fun humanReadablePlaybackError(
+            error: Throwable?,
+            isYouTubeTrack: Boolean
+        ): String {
+            val raw = error?.message.orEmpty().trim()
+            val combinedMsg = collectExceptionMessages(error).ifBlank { raw }
+            if (isYouTubeTrack) {
+                val requiresYouTubeFormatting = error is YouTubeHttpException ||
+                    error is ExtractionException ||
+                    isNetworkConnectivityError(error, combinedMsg) ||
+                    findCause<SocketTimeoutException>(error) != null ||
+                    HTTP_401_REGEX.containsMatchIn(combinedMsg) ||
+                    HTTP_402_REGEX.containsMatchIn(combinedMsg) ||
+                    HTTP_403_REGEX.containsMatchIn(combinedMsg) ||
+                    HTTP_429_REGEX.containsMatchIn(combinedMsg) ||
+                    combinedMsg.startsWith("Response code:", ignoreCase = true) ||
+                    isBotOrSignInRequiredError(error, combinedMsg) ||
+                    isAgeRestrictedError(error, combinedMsg) ||
+                    isRegionRestrictedError(error, combinedMsg) ||
+                    isPrivateOrUploaderRestrictedError(error, combinedMsg) ||
+                    isPaidOrPremiumContentError(error, combinedMsg) ||
+                    TECHNICAL_STACK_OR_URL_REGEX.containsMatchIn(raw)
+                return if (requiresYouTubeFormatting) {
+                    humanReadableExtractionError(error)
+                } else if (raw.isNotBlank()) {
+                    sanitizeUserFacingDetail(raw, fallback = "Couldn't load audio stream right now. Please try again.")
+                } else {
+                    "Could not resolve audio stream"
+                }
+            }
+            return when {
+                isNetworkConnectivityError(error, combinedMsg) ->
+                    "Network error — you appear to be offline. Check your connection or play downloaded songs."
+                findCause<SocketTimeoutException>(error) != null || combinedMsg.contains("timed out", ignoreCase = true) ->
+                    "Stream timed out while loading audio. Check your connection and retry."
+                else -> sanitizeUserFacingDetail(
+                    raw,
+                    fallback = "Couldn't play this track right now. Tap Retry to try again."
+                )
             }
         }
 
@@ -2371,17 +2462,23 @@ class YouTubeMusicClient internal constructor(
                     if (detail.contains("not available on this app", ignoreCase = true)) {
                         "YouTube declined playback on this client ($detail)."
                     } else if (detail.isNotBlank()) {
-                        "YouTube reported this stream as unavailable: $detail"
+                        val safeDetail = sanitizeUserFacingDetail(detail, fallback = "This track is currently unavailable on YouTube.")
+                        if (safeDetail == detail) "YouTube reported this stream as unavailable: $safeDetail" else safeDetail
                     } else {
                         "YouTube reported this stream as unavailable."
                     }
                 }
-                isNetworkConnectivityError(error) ->
-                    "Network error reaching YouTube${if (raw.isNotBlank()) " ($raw)" else ""}. Check your connection and retry."
-                findCause<SocketTimeoutException>(error) != null ->
-                    "YouTube stream resolution timed out. Check your connection and retry."
-                raw.isNotBlank() ->
-                    "Could not resolve audio stream: $raw"
+                isNetworkConnectivityError(error, combinedMsg) ->
+                    "Network error — you appear to be offline or unable to reach YouTube. Check your connection and retry."
+                findCause<SocketTimeoutException>(error) != null || combinedMsg.contains("timed out", ignoreCase = true) ->
+                    "Connection timed out while loading audio. Check your connection and retry."
+                raw.isNotBlank() -> {
+                    val safeDetail = sanitizeUserFacingDetail(
+                        raw,
+                        fallback = "Couldn't load audio stream right now. Please try again."
+                    )
+                    if (safeDetail == raw) "Could not resolve audio stream: $safeDetail" else safeDetail
+                }
                 else ->
                     "Could not resolve audio stream"
             }

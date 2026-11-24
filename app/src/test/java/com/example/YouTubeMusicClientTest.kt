@@ -639,12 +639,35 @@ class YouTubeMusicClientTest {
         assertTrue(YouTubeMusicClient.isYouTubeSignInSuggestionError(botMsg))
 
         val dnsMsg = YouTubeMusicClient.humanReadableExtractionError(
-            error = UnknownHostException("Unable to resolve host"),
+            error = UnknownHostException("Unable to resolve host \"www.youtube.com\": No address associated with hostname"),
             hasAuthenticatedSession = false,
             hasConfiguredCookie = false,
             wasSessionRejected = false
         )
         assertTrue(dnsMsg.contains("Network error", true))
+        assertFalse(dnsMsg.contains("Unable to resolve host", true))
+        assertFalse(dnsMsg.contains("www.youtube.com", true))
+        assertFalse(dnsMsg.contains("No address associated with hostname", true))
+
+        val wrappedDnsMsg = YouTubeMusicClient.humanReadablePlaybackError(
+            error = IOException("Unable to resolve host \"rr3---sn-test.googlevideo.com\": No address associated with hostname"),
+            isYouTubeTrack = false
+        )
+        assertFalse(wrappedDnsMsg.contains("Unable to resolve host", true))
+        assertFalse(wrappedDnsMsg.contains("googlevideo.com", true))
+
+        val searchDnsMsg = YouTubeMusicClient.humanReadableSearchError(
+            UnknownHostException("Unable to resolve host \"music.youtube.com\": No address associated with hostname")
+        )
+        assertFalse(searchDnsMsg.contains("music.youtube.com", true))
+        assertFalse(searchDnsMsg.contains("Unable to resolve host", true))
+
+        val firestoreMsg = YouTubeMusicClient.humanReadableError(
+            error = IOException("UNAVAILABLE: Unable to resolve host firestore.googleapis.com:443"),
+            fallback = "Action unavailable offline"
+        )
+        assertFalse(firestoreMsg.contains("firestore.googleapis.com", true))
+        assertFalse(firestoreMsg.contains("Unable to resolve host", true))
 
         val http403 = YouTubeHttpException(403, "YouTube stream probe HTTP 403")
         val genericUnavailable = ContentNotAvailableException("Video unavailable")

@@ -17,6 +17,7 @@ import com.example.data.model.SonicDnaProfile
 import com.example.data.model.SyncedTrackDoc
 import com.example.data.model.Track
 import com.example.data.model.UserProfile
+import com.example.data.remote.YouTubeMusicClient
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestoreException
@@ -147,7 +148,7 @@ class SocialViewModel(
             val res = socialRepo.sendFriendRequest(_currentUserProfile.value, target)
             _socialNotice.value = res.fold(
                 onSuccess = { "Friend request sent to ${target.displayName}" },
-                onFailure = { it.localizedMessage ?: "Failed to send request" }
+                onFailure = { YouTubeMusicClient.humanReadableError(it, "Couldn't send friend request right now.") }
             )
         }
     }
@@ -157,7 +158,7 @@ class SocialViewModel(
             val res = socialRepo.acceptFriendRequest(requestId)
             _socialNotice.value = res.fold(
                 onSuccess = { "Friend connected!" },
-                onFailure = { it.localizedMessage ?: "Failed to accept request" }
+                onFailure = { YouTubeMusicClient.humanReadableError(it, "Couldn't accept friend request right now.") }
             )
         }
     }
@@ -197,7 +198,7 @@ class SocialViewModel(
             )
             _socialNotice.value = res.fold(
                 onSuccess = { "Created $matchPct% Sonic Blend playlist with ${friend.displayName}!" },
-                onFailure = { it.localizedMessage ?: "Could not create Taste Blend" }
+                onFailure = { YouTubeMusicClient.humanReadableError(it, "Could not create Taste Blend right now.") }
             )
         }
     }
@@ -220,7 +221,7 @@ class SocialViewModel(
             )
             _socialNotice.value = res.fold(
                 onSuccess = { "Shared ${track.title} to your feed" },
-                onFailure = { it.localizedMessage ?: "Failed to post" }
+                onFailure = { YouTubeMusicClient.humanReadableError(it, "Could not publish post right now.") }
             )
         }
     }
@@ -277,7 +278,7 @@ class SocialViewModel(
                 openConversation(convId)
                 _socialNotice.value = "Sent to ${recipient.displayName}"
             }.onFailure {
-                _socialNotice.value = it.localizedMessage ?: "Message failed"
+                _socialNotice.value = YouTubeMusicClient.humanReadableError(it, "Couldn't send message right now.")
             }
         }
     }
@@ -293,7 +294,7 @@ class SocialViewModel(
             )
             _socialNotice.value = res.fold(
                 onSuccess = { "Collaborative playlist '$title' created" },
-                onFailure = { it.localizedMessage ?: "Playlist creation failed" }
+                onFailure = { YouTubeMusicClient.humanReadableError(it, "Couldn't create playlist right now.") }
             )
         }
     }
@@ -303,7 +304,7 @@ class SocialViewModel(
             val res = socialRepo.addTrackToCollaborativePlaylist(playlist, track)
             _socialNotice.value = res.fold(
                 onSuccess = { "Added ${track.title} to ${playlist.title}" },
-                onFailure = { it.localizedMessage ?: "Could not add track" }
+                onFailure = { YouTubeMusicClient.humanReadableError(it, "Couldn't add track right now.") }
             )
         }
     }
@@ -325,7 +326,7 @@ class SocialViewModel(
                 observePulseRoomSession(roomId)
                 onRoomCreated(roomId)
             }.onFailure {
-                _socialNotice.value = it.localizedMessage ?: "Could not start PulseRoom"
+                _socialNotice.value = YouTubeMusicClient.humanReadableError(it, "Could not start PulseRoom right now.")
             }
         }
     }
@@ -343,7 +344,7 @@ class SocialViewModel(
             val res = socialRepo.renamePulseRoom(roomId, newName)
             _socialNotice.value = res.fold(
                 onSuccess = { "Updated room name to '${newName.trim()}'" },
-                onFailure = { it.localizedMessage ?: "Could not rename room" }
+                onFailure = { YouTubeMusicClient.humanReadableError(it, "Could not rename room right now.") }
             )
         }
     }
@@ -421,7 +422,7 @@ class SocialViewModel(
             val res = socialRepo.addLyricNote(trackKey, _currentUserProfile.value.displayName, timestampMs, text)
             _socialNotice.value = res.fold(
                 onSuccess = { "Pinned lyric note for friends!" },
-                onFailure = { it.localizedMessage ?: "Could not pin lyric note" }
+                onFailure = { YouTubeMusicClient.humanReadableError(it, "Could not pin lyric note right now.") }
             )
         }
     }
