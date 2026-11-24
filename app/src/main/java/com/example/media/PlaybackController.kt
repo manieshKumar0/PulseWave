@@ -266,6 +266,10 @@ class PlaybackController internal constructor(
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                val isSameTrackPlaylistUpdate =
+                    reason == Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED &&
+                        mediaItem?.mediaId != null &&
+                        mediaItem.mediaId == lastTrackId
                 if (lastTrackId != null && lastTrackId != mediaItem?.mediaId) {
                     recordTrackSignal(completed = false)
                 }
@@ -274,19 +278,25 @@ class PlaybackController internal constructor(
                 val nextTrack = queue.getOrNull(idx)
                     ?: mediaItem?.let { PulseMediaItemMapper.fromMediaItem(it) }
                 if (nextTrack != null) {
-                    lastTrackId = nextTrack.id
-                    lastRetriedYouTubeId = null
-                    youtubeRetryCount = 0
-                    trackPlayStartedMs = System.currentTimeMillis()
-                    maxPositionReachedMs = 0L
-                    seekBackCounter = 0
-                    triggerFadeInIfEnabled(controller)
+                    if (!isSameTrackPlaylistUpdate) {
+                        lastTrackId = nextTrack.id
+                        lastRetriedYouTubeId = null
+                        youtubeRetryCount = 0
+                        trackPlayStartedMs = System.currentTimeMillis()
+                        maxPositionReachedMs = 0L
+                        seekBackCounter = 0
+                        triggerFadeInIfEnabled(controller)
+                    }
                     _state.update {
                         it.copy(
                             currentTrack = nextTrack,
                             currentIndex = idx,
-                            durationMs = nextTrack.durationMs,
-                            playbackError = null
+                            durationMs = if (isSameTrackPlaylistUpdate && it.durationMs > 0L) {
+                                it.durationMs
+                            } else {
+                                nextTrack.durationMs
+                            },
+                            playbackError = if (isSameTrackPlaylistUpdate) it.playbackError else null
                         )
                     }
                     // If this queue slot is still a lazy pulseyt:// URI, resolve it on-demand
@@ -1369,12 +1379,10 @@ class PlaybackController internal constructor(
                         overrideUri = existingUri,
                         mimeType = existingMime
                     ) ?: continue
-                    val prevTrack = PulseMediaItemMapper.fromMediaItem(existing)
                     val displayChanged = existing.mediaMetadata.title?.toString() != replacement.mediaMetadata.title?.toString() ||
                         existing.mediaMetadata.artist?.toString() != replacement.mediaMetadata.artist?.toString() ||
                         existing.mediaMetadata.albumTitle?.toString() != replacement.mediaMetadata.albumTitle?.toString() ||
-                        existing.mediaMetadata.artworkUri != replacement.mediaMetadata.artworkUri ||
-                        prevTrack?.isLiked != updated.isLiked
+                        existing.mediaMetadata.artworkUri != replacement.mediaMetadata.artworkUri
                     if (displayChanged) {
                         controller.replaceMediaItem(idx, replacement)
                     }

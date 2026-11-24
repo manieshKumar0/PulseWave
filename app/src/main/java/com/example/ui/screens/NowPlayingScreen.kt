@@ -6,6 +6,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -32,12 +34,16 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Bedtime
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.DownloadDone
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
+import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Pause
@@ -53,10 +59,12 @@ import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
@@ -66,6 +74,7 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -80,6 +89,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -164,7 +174,10 @@ fun NowPlayingScreen(
     onMorphSoundscape: (SoundscapePreset, SoundscapePreset, Float) -> Unit,
     onUpdateBand: (Int, Int) -> Unit,
     onUpdateBassBoost: (Int) -> Unit,
-    onUpdateReverbPreset: (Int) -> Unit
+    onUpdateReverbPreset: (Int) -> Unit,
+    onPlayQueueTrack: (Track) -> Unit = {},
+    onStartSleepTimer: (Int) -> Unit = {},
+    onCancelSleepTimer: () -> Unit = {}
 ) {
     BackHandler(onBack = onClose)
 
@@ -185,6 +198,8 @@ fun NowPlayingScreen(
     }
     var selectedStudioTab by remember { mutableIntStateOf(0) }
     var showCreateRoomDialog by remember { mutableStateOf(false) }
+    var showQueueSheet by remember { mutableStateOf(false) }
+    var showSleepTimerSheet by remember { mutableStateOf(false) }
     val studioTabs = listOf("Player", "Lyrics", "Soundscape")
 
     Box(
@@ -349,6 +364,8 @@ fun NowPlayingScreen(
                 onCycleRepeat = onCycleRepeat,
                 onToggleLike = { onToggleLike(track) },
                 onDownloadClick = { onDownloadClick(track) },
+                onOpenQueue = { showQueueSheet = true },
+                onOpenSleepTimer = { showSleepTimerSheet = true },
                 onConnectYouTube = onConnectYouTube,
                 onRetryPlayback = onRetryPlayback
             )
@@ -396,6 +413,35 @@ fun NowPlayingScreen(
             }
         )
     }
+
+    if (showQueueSheet) {
+        UpNextQueueSheet(
+            queue = playbackState.queue,
+            activeTrackId = track.id,
+            glowPrimary = glowPrimary,
+            onSelectTrack = { queuedTrack ->
+                showQueueSheet = false
+                onPlayQueueTrack(queuedTrack)
+            },
+            onDismiss = { showQueueSheet = false }
+        )
+    }
+
+    if (showSleepTimerSheet) {
+        QuickSleepTimerSheet(
+            remainingMs = playbackState.sleepTimerRemainingMs,
+            glowPrimary = glowPrimary,
+            onStartTimer = { mins ->
+                onStartSleepTimer(mins)
+                showSleepTimerSheet = false
+            },
+            onCancelTimer = {
+                onCancelSleepTimer()
+                showSleepTimerSheet = false
+            },
+            onDismiss = { showSleepTimerSheet = false }
+        )
+    }
 }
 
 @Composable
@@ -416,6 +462,8 @@ private fun PlayerTab(
     onCycleRepeat: () -> Unit,
     onToggleLike: () -> Unit,
     onDownloadClick: () -> Unit,
+    onOpenQueue: () -> Unit,
+    onOpenSleepTimer: () -> Unit,
     onConnectYouTube: () -> Unit,
     onRetryPlayback: () -> Unit
 ) {
@@ -426,22 +474,81 @@ private fun PlayerTab(
         label = "now_playing_visualizer_height"
     )
 
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 22.dp, vertical = 12.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        contentAlignment = Alignment.TopCenter
     ) {
-        TrackArtworkThumb(
-            artworkUrl = track.displayArtworkUri,
-            title = track.title,
+        Column(
             modifier = Modifier
-                .fillMaxWidth(0.84f)
-                .height(254.dp),
-            cornerRadius = 28.dp
-        )
+                .widthIn(max = 500.dp)
+                .fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            val haptics = LocalHapticFeedback.current
+            val likeScale by animateFloatAsState(
+                targetValue = if (track.isLiked) 1.16f else 1.0f,
+                animationSpec = spring(dampingRatio = 0.45f, stiffness = 500f),
+                label = "now_playing_like_scale"
+            )
+            val posterShape = RoundedCornerShape(18.dp)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(254.dp)
+                    .shadow(
+                        elevation = 24.dp,
+                        shape = posterShape,
+                        clip = false,
+                        ambientColor = Color.Black.copy(alpha = 0.70f),
+                        spotColor = Color.Black.copy(alpha = 0.90f)
+                    )
+            ) {
+                TrackArtworkThumb(
+                    artworkUrl = track.displayArtworkUri,
+                    title = track.title,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("now_playing_album_poster"),
+                    cornerRadius = 18.dp
+                )
+
+                IconButton(
+                    onClick = {
+                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        onToggleLike()
+                    },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(6.dp)
+                        .minimumInteractiveComponentSize()
+                        .testTag("now_playing_like_button")
+                ) {
+                    Surface(
+                        shape = CircleShape,
+                        color = Color.Black.copy(alpha = 0.44f),
+                        border = BorderStroke(0.75.dp, Color.White.copy(alpha = 0.16f)),
+                        modifier = Modifier.size(38.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = if (track.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                                contentDescription = if (track.isLiked) "Unlike track" else "Like track",
+                                tint = if (track.isLiked) CoralWave else Color.White.copy(alpha = 0.92f),
+                                modifier = Modifier
+                                    .size(20.dp)
+                                    .graphicsLayer {
+                                        scaleX = likeScale
+                                        scaleY = likeScale
+                                    }
+                            )
+                        }
+                    }
+                }
+            }
 
         if (visualizerStyle != VisualizerStyle.NEON_SKYLINE) {
             BeatReactiveWaveformCanvas(
@@ -463,95 +570,27 @@ private fun PlayerTab(
         }
 
         Column(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = track.title,
-                        style = MaterialTheme.typography.headlineMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = track.artist,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-
-                val haptics = LocalHapticFeedback.current
-                val likeScale by animateFloatAsState(
-                    targetValue = if (track.isLiked) 1.16f else 1.0f,
-                    animationSpec = spring(dampingRatio = 0.45f, stiffness = 500f),
-                    label = "now_playing_like_scale"
-                )
-
-                Row {
-                    IconButton(
-                        onClick = {
-                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            onToggleLike()
-                        },
-                        modifier = Modifier.minimumInteractiveComponentSize().testTag("now_playing_like_button")
-                    ) {
-                        Icon(
-                            imageVector = if (track.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                            contentDescription = if (track.isLiked) "Unlike track" else "Like track",
-                            tint = if (track.isLiked) CoralWave else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.graphicsLayer {
-                                scaleX = likeScale
-                                scaleY = likeScale
-                            }
-                        )
-                    }
-                    if (track.canDownloadOffline || track.isDownloaded) {
-                        IconButton(
-                            onClick = {
-                                if (downloadProgress == null) {
-                                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                    onDownloadClick()
-                                }
-                            },
-                            modifier = Modifier.minimumInteractiveComponentSize().testTag("now_playing_download_button")
-                        ) {
-                            when {
-                                downloadProgress != null && downloadProgress < 0.08f -> CircularProgressIndicator(
-                                    modifier = Modifier.size(22.dp),
-                                    strokeWidth = 2.dp,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                                downloadProgress != null -> {
-                                    val animatedProgress by animateFloatAsState(
-                                        targetValue = downloadProgress.coerceIn(0f, 1f),
-                                        animationSpec = spring(stiffness = 300f),
-                                        label = "now_playing_download_progress"
-                                    )
-                                    CircularProgressIndicator(
-                                        progress = { animatedProgress },
-                                        modifier = Modifier.size(22.dp),
-                                        strokeWidth = 2.4.dp,
-                                        color = MintElectric
-                                    )
-                                }
-                                track.isDownloaded -> Icon(
-                                    imageVector = Icons.Rounded.DownloadDone,
-                                    contentDescription = "Remove offline download",
-                                    tint = MintElectric
-                                )
-                                else -> Icon(Icons.Rounded.Download, contentDescription = "Download offline")
-                            }
-                        }
-                    }
-                }
-            }
+            Text(
+                text = track.title,
+                style = MaterialTheme.typography.headlineMedium,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = track.artist,
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
 
         if (playbackState.playbackError != null) {
@@ -631,30 +670,36 @@ private fun PlayerTab(
         // Transport Controls
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly,
+            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(
                 onClick = onToggleShuffle,
-                modifier = Modifier.minimumInteractiveComponentSize()
+                modifier = Modifier
+                    .offset(x = (-8).dp)
+                    .minimumInteractiveComponentSize()
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Shuffle,
                     contentDescription = "Shuffle",
-                    tint = if (playbackState.shuffleEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    tint = if (playbackState.shuffleEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(27.dp)
                 )
             }
             IconButton(
                 onClick = onSkipPrevious,
-                modifier = Modifier.minimumInteractiveComponentSize().testTag("player_prev_button")
+                modifier = Modifier
+                    .offset(x = (-5).dp)
+                    .minimumInteractiveComponentSize()
+                    .testTag("player_prev_button")
             ) {
-                Icon(Icons.Rounded.SkipPrevious, contentDescription = "Previous track", modifier = Modifier.size(34.dp))
+                Icon(Icons.Rounded.SkipPrevious, contentDescription = "Previous track", modifier = Modifier.size(38.dp))
             }
             Surface(
                 shape = CircleShape,
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier
-                    .size(66.dp)
+                    .size(72.dp)
                     .clip(CircleShape)
                     .clickable(onClick = onTogglePlayPause)
                     .testTag("player_play_pause_button")
@@ -663,28 +708,33 @@ private fun PlayerTab(
                     if (playbackState.isBuffering) {
                         CircularProgressIndicator(
                             color = MaterialTheme.colorScheme.onPrimary,
-                            modifier = Modifier.size(26.dp),
-                            strokeWidth = 2.5.dp
+                            modifier = Modifier.size(28.dp),
+                            strokeWidth = 2.6.dp
                         )
                     } else {
                         Icon(
                             imageVector = if (playbackState.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                             contentDescription = if (playbackState.isPlaying) "Pause" else "Play",
                             tint = MaterialTheme.colorScheme.onPrimary,
-                            modifier = Modifier.size(36.dp)
+                            modifier = Modifier.size(40.dp)
                         )
                     }
                 }
             }
             IconButton(
                 onClick = onSkipNext,
-                modifier = Modifier.minimumInteractiveComponentSize().testTag("player_next_button")
+                modifier = Modifier
+                    .offset(x = 5.dp)
+                    .minimumInteractiveComponentSize()
+                    .testTag("player_next_button")
             ) {
-                Icon(Icons.Rounded.SkipNext, contentDescription = "Next track", modifier = Modifier.size(34.dp))
+                Icon(Icons.Rounded.SkipNext, contentDescription = "Next track", modifier = Modifier.size(38.dp))
             }
             IconButton(
                 onClick = onCycleRepeat,
-                modifier = Modifier.minimumInteractiveComponentSize()
+                modifier = Modifier
+                    .offset(x = 8.dp)
+                    .minimumInteractiveComponentSize()
             ) {
                 val icon = if (playbackState.repeatMode == Player.REPEAT_MODE_ONE) {
                     Icons.Rounded.RepeatOne
@@ -698,9 +748,11 @@ private fun PlayerTab(
                         MaterialTheme.colorScheme.primary
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant
-                    }
+                    },
+                    modifier = Modifier.size(27.dp)
                 )
             }
+        }
         }
     }
 }
@@ -1118,6 +1170,222 @@ private fun SoundscapeLabTab(
                     }
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun UpNextQueueSheet(
+    queue: List<Track>,
+    activeTrackId: String,
+    glowPrimary: Color,
+    onSelectTrack: (Track) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = "Up Next",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "${queue.size} track${if (queue.size == 1) "" else "s"} in queue",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.minimumInteractiveComponentSize()
+                ) {
+                    Icon(Icons.Rounded.Close, contentDescription = "Close queue")
+                }
+            }
+
+            if (queue.isEmpty()) {
+                Text(
+                    text = "Queue is currently empty.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 20.dp)
+                )
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(340.dp),
+                    contentPadding = PaddingValues(bottom = 18.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    itemsIndexed(queue, key = { idx, item -> "${idx}_${item.id}" }) { _, queued ->
+                        val isActive = queued.id == activeTrackId
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = if (isActive) glowPrimary.copy(alpha = 0.16f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable { onSelectTrack(queued) }
+                                .minimumInteractiveComponentSize()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                TrackArtworkThumb(
+                                    artworkUrl = queued.displayArtworkUri,
+                                    title = queued.title,
+                                    modifier = Modifier.size(44.dp),
+                                    cornerRadius = 10.dp
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = queued.title,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = if (isActive) glowPrimary else MaterialTheme.colorScheme.onSurface,
+                                        fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = queued.artist,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (isActive) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.GraphicEq,
+                                        contentDescription = "Now playing",
+                                        tint = glowPrimary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun QuickSleepTimerSheet(
+    remainingMs: Long?,
+    glowPrimary: Color,
+    onStartTimer: (Int) -> Unit,
+    onCancelTimer: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val presets = listOf(15, 30, 45, 60)
+    val isActive = remainingMs != null && remainingMs > 0L
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Bedtime,
+                        contentDescription = null,
+                        tint = if (isActive) MintElectric else glowPrimary
+                    )
+                    Column {
+                        Text(
+                            text = "Sleep Timer",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = if (isActive) {
+                                "Time remaining: ${formatMillis(remainingMs!!)}"
+                            } else {
+                                "Pause playback automatically after"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (isActive) MintElectric else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.minimumInteractiveComponentSize()
+                ) {
+                    Icon(Icons.Rounded.Close, contentDescription = "Close sleep timer")
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                presets.forEach { mins ->
+                    OutlinedButton(
+                        onClick = { onStartTimer(mins) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("now_playing_sleep_${mins}m")
+                    ) {
+                        Text("${mins}m", maxLines = 1)
+                    }
+                }
+            }
+
+            if (isActive) {
+                Button(
+                    onClick = onCancelTimer,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("now_playing_cancel_sleep_timer")
+                ) {
+                    Text("Turn Off Sleep Timer")
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
         }
     }
 }

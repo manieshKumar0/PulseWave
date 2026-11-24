@@ -549,6 +549,9 @@ internal class ResolvingYouTubeMediaSource(
     private val released = AtomicBoolean(false)
 
     @Volatile
+    private var currentMediaItem: MediaItem = originalMediaItem
+
+    @Volatile
     private var childSource: MediaSource? = null
 
     @Volatile
@@ -556,7 +559,29 @@ internal class ResolvingYouTubeMediaSource(
 
     internal fun preparedChildSourceForTest(): MediaSource? = childSource
 
-    override fun getMediaItem(): MediaItem = originalMediaItem
+    override fun getMediaItem(): MediaItem = currentMediaItem
+
+    override fun canUpdateMediaItem(mediaItem: MediaItem): Boolean {
+        return mediaItem.mediaId == currentMediaItem.mediaId &&
+            mediaItem.localConfiguration?.uri == currentMediaItem.localConfiguration?.uri
+    }
+
+    override fun updateMediaItem(mediaItem: MediaItem) {
+        currentMediaItem = mediaItem
+        val child = childSource ?: return
+        val childLocalConfig = child.mediaItem.localConfiguration
+        val childUpdated = if (childLocalConfig != null) {
+            mediaItem.buildUpon()
+                .setUri(childLocalConfig.uri)
+                .setMimeType(childLocalConfig.mimeType)
+                .build()
+        } else {
+            mediaItem
+        }
+        if (child.canUpdateMediaItem(childUpdated)) {
+            child.updateMediaItem(childUpdated)
+        }
+    }
 
     override fun prepareSourceInternal(mediaTransferListener: TransferListener?) {
         super.prepareSourceInternal(mediaTransferListener)

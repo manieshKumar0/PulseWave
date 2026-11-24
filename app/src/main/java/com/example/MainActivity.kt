@@ -932,7 +932,12 @@ private fun AuthenticatedPulseApp(
                     },
                     onUpdateBand = { idx, mb -> pulseViewModel.updateEqualizerBand(idx, mb) },
                     onUpdateBassBoost = { pulseViewModel.updateBassBoost(it) },
-                    onUpdateReverbPreset = { pulseViewModel.updateReverbPreset(it) }
+                    onUpdateReverbPreset = { pulseViewModel.updateReverbPreset(it) },
+                    onPlayQueueTrack = { selected ->
+                        pulseViewModel.playTrack(selected, nowPlayingState.queue.ifEmpty { listOf(selected) })
+                    },
+                    onStartSleepTimer = { mins -> pulseViewModel.startSleepTimer(mins) },
+                    onCancelSleepTimer = { pulseViewModel.cancelSleepTimer() }
                 )
             }
 

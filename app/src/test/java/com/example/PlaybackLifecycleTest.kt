@@ -972,6 +972,58 @@ class PlaybackLifecycleTest {
         controller.release()
     }
 
+    @Test
+    fun updateTrackMetadata_likeToggleDoesNotDipVolumeOrReplaceActiveItem() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val fakePlayer = FakeMediaPlayer()
+        val controller = PlaybackController(
+            context = context,
+            signalDao = NoOpSignalDao(),
+            youtubeClient = YouTubeMusicClient(),
+            injectedPlayer = fakePlayer.player,
+            autoConnectController = false
+        )
+        // Crossfade enabled by default (4s) — previously triggered a 0.04f volume dip on Like!
+        assertEquals(4, controller.state.value.crossfadeSeconds)
+
+        val localTrack = Track(
+            id = "device_ms_like_1",
+            title = "Steady Volume Song",
+            artist = "Pulse Artist",
+            localUri = "content://media/external/audio/media/904",
+            sourceType = TrackSourceType.LOCAL_SAF,
+            durationMs = 200_000L,
+            isLiked = false
+        )
+
+        controller.playTrack(localTrack, listOf(localTrack))
+        shadowOf(Looper.getMainLooper()).idle()
+        // Finish initial fade-in completely so volume reaches 1f
+        controller.setCrossfadeSeconds(0)
+        shadowOf(Looper.getMainLooper()).idle()
+        controller.setCrossfadeSeconds(4)
+        fakePlayer.volume = 1f
+        fakePlayer.replaceMediaItemCount = 0
+
+        // Toggling Like must update state immediately without replacing active MediaItem or dipping volume
+        controller.updateTrackMetadata(localTrack.copy(isLiked = true))
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertTrue(controller.state.value.currentTrack?.isLiked == true)
+        assertEquals(0, fakePlayer.replaceMediaItemCount)
+        assertEquals(1f, fakePlayer.volume, 0.01f)
+
+        // Even if display metadata (title) updates in-place and fires PLAYLIST_CHANGED, volume must not dip
+        controller.updateTrackMetadata(localTrack.copy(isLiked = true, title = "Steady Volume (Remastered)"))
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals("Steady Volume (Remastered)", controller.state.value.currentTrack?.title)
+        assertEquals(1, fakePlayer.replaceMediaItemCount)
+        assertEquals(1f, fakePlayer.volume, 0.01f)
+
+        controller.release()
+    }
+
     private fun fakeStream(url: String): ResolvedAudioStream = ResolvedAudioStream(
         url = url,
         mimeType = "audio/mp4",
@@ -998,6 +1050,7 @@ class PlaybackLifecycleTest {
         var positionMs: Long = 0L
         var durationMs: Long = 0L
         var enforceMainThread: Boolean = false
+        var replaceMediaItemCount: Int = 0
 
         val player: Player = Proxy.newProxyInstance(
             Player::class.java.classLoader,
@@ -1032,8 +1085,17 @@ class PlaybackLifecycleTest {
                     val idx = args?.getOrNull(0) as? Int ?: 0
                     val item = args?.getOrNull(1) as? MediaItem
                     if (item != null && idx in items.indices) {
+                        replaceMediaItemCount++
                         items[idx] = item
                         lastPreparedItems = items.toList()
+                        if (idx == currentIndex) {
+                            listeners.forEach {
+                                it.onMediaItemTransition(
+                                    item,
+                                    Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED
+                                )
+                            }
+                        }
                     }
                     Unit
                 }
