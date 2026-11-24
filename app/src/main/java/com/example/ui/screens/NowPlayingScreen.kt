@@ -41,11 +41,13 @@ import androidx.compose.material.icons.rounded.Bedtime
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.DownloadDone
+import androidx.compose.material.icons.rounded.Equalizer
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Radio
@@ -59,7 +61,10 @@ import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -101,6 +106,7 @@ import androidx.media3.common.Player
 import com.example.data.model.LyricLine
 import com.example.data.model.LyricNoteDoc
 import com.example.data.model.PulseRoomDoc
+import com.example.data.model.SoundscapePreset
 import com.example.data.model.Track
 import com.example.data.model.UserProfile
 import com.example.data.remote.YouTubeMusicClient
@@ -108,6 +114,7 @@ import com.example.media.PlaybackUiState
 import com.example.ui.components.BeatReactiveLyricState
 import com.example.ui.components.BeatReactiveWaveformCanvas
 import com.example.ui.components.CreatePulseRoomDialog
+import com.example.ui.components.EqualizerControlPanel
 import com.example.ui.components.NeonSkylineBackgroundOverlay
 import com.example.ui.components.ObsidianGlassCard
 import com.example.ui.components.PulseRoomStatusBadge
@@ -123,6 +130,7 @@ import com.example.ui.theme.MintElectric
 import com.example.ui.theme.PlayfairDisplayFontFamily
 import com.example.ui.theme.UltravioletPulse
 import com.example.ui.viewmodel.UiState
+import kotlin.math.roundToInt
 
 @Composable
 fun NowPlayingScreen(
@@ -165,7 +173,14 @@ fun NowPlayingScreen(
     onAddLyricNote: (Track, Long, String) -> Unit,
     onPlayQueueTrack: (Track) -> Unit = {},
     onStartSleepTimer: (Int) -> Unit = {},
-    onCancelSleepTimer: () -> Unit = {}
+    onCancelSleepTimer: () -> Unit = {},
+    onToggleEqEnabled: (Boolean) -> Unit = {},
+    onSelectEqPreset: (SoundscapePreset) -> Unit = {},
+    onUpdateEqBand: (Int, Int) -> Unit = { _, _ -> },
+    onUpdateEqBassBoost: (Int) -> Unit = {},
+    onUpdateEqReverb: (Int) -> Unit = {},
+    onResetEqualizer: () -> Unit = {},
+    onOpenVisualizerSettings: () -> Unit = {}
 ) {
     BackHandler(onBack = onClose)
 
@@ -185,9 +200,11 @@ fun NowPlayingScreen(
         )
     }
     var selectedStudioTab by remember { mutableIntStateOf(0) }
+    var showMoreMenu by remember { mutableStateOf(false) }
     var showCreateRoomDialog by remember { mutableStateOf(false) }
     var showQueueSheet by remember { mutableStateOf(false) }
     var showSleepTimerSheet by remember { mutableStateOf(false) }
+    var showEqualizerSheet by remember { mutableStateOf(false) }
     val studioTabs = listOf("Player", "Lyrics")
 
     Box(
@@ -267,32 +284,184 @@ fun NowPlayingScreen(
                 )
             }
 
-            Row(modifier = Modifier.align(Alignment.CenterEnd)) {
-                IconButton(
-                    onClick = {
-                        if (!isSignedIn) {
-                            onRequestSignIn("PulseRooms co-listening")
-                        } else if (activePulseRoom != null && activePulseRoom.active) {
-                            onOpenPulseRoom(activePulseRoom)
-                        } else {
-                            showCreateRoomDialog = true
-                        }
-                    },
-                    modifier = Modifier
-                        .minimumInteractiveComponentSize()
-                        .testTag("now_playing_pulseroom_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Radio,
-                        contentDescription = if (activePulseRoom != null && activePulseRoom.active) "Open active PulseRoom" else "Create PulseRoom",
-                        tint = if (activePulseRoom != null && activePulseRoom.active) MintElectric else MaterialTheme.colorScheme.onSurface
-                    )
-                }
+            Row(
+                modifier = Modifier.align(Alignment.CenterEnd),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 IconButton(
                     onClick = { onShareClick(track) },
-                    modifier = Modifier.minimumInteractiveComponentSize().testTag("now_playing_share_button")
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .testTag("now_playing_share_button")
                 ) {
                     Icon(Icons.Rounded.Share, contentDescription = "Share track")
+                }
+
+                Box {
+                    IconButton(
+                        onClick = { showMoreMenu = true },
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("now_playing_more_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.MoreVert,
+                            contentDescription = "More player options"
+                        )
+                    }
+
+                    val sleepRemaining = playbackState.sleepTimerRemainingMs
+                    val isSleepActive = sleepRemaining != null && sleepRemaining > 0L
+                    val isRoomActive = activePulseRoom != null && activePulseRoom.active
+                    DropdownMenu(
+                        expanded = showMoreMenu,
+                        onDismissRequest = { showMoreMenu = false },
+                        shape = RoundedCornerShape(18.dp),
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        modifier = Modifier.widthIn(min = 224.dp)
+                    ) {
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = when {
+                                        downloadProgress != null -> "Downloading ${(downloadProgress * 100).roundToInt()}%"
+                                        track.isDownloaded -> "Remove Offline Download"
+                                        else -> "Download Offline"
+                                    }
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = if (track.isDownloaded) Icons.Rounded.DownloadDone else Icons.Rounded.Download,
+                                    contentDescription = null,
+                                    tint = if (track.isDownloaded) MintElectric else MaterialTheme.colorScheme.onSurface
+                                )
+                            },
+                            enabled = downloadProgress == null,
+                            onClick = {
+                                showMoreMenu = false
+                                onDownloadClick(track)
+                            },
+                            modifier = Modifier.testTag("more_menu_download")
+                        )
+
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = if (playbackState.queue.isNotEmpty()) {
+                                        "Up Next Queue (${playbackState.queue.size})"
+                                    } else {
+                                        "Up Next Queue"
+                                    }
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Rounded.QueueMusic,
+                                    contentDescription = null
+                                )
+                            },
+                            onClick = {
+                                showMoreMenu = false
+                                showQueueSheet = true
+                            },
+                            modifier = Modifier.testTag("more_menu_queue")
+                        )
+
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = if (playbackState.eqEnabled) {
+                                        "Equalizer · ${playbackState.activeSoundscape.name}"
+                                    } else {
+                                        "Equalizer · Off"
+                                    }
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.Equalizer,
+                                    contentDescription = null,
+                                    tint = if (playbackState.eqEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                )
+                            },
+                            onClick = {
+                                showMoreMenu = false
+                                showEqualizerSheet = true
+                            },
+                            modifier = Modifier.testTag("more_menu_equalizer")
+                        )
+
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = if (isSleepActive) {
+                                        "Sleep Timer · ${formatMillis(sleepRemaining!!)}"
+                                    } else {
+                                        "Sleep Timer"
+                                    }
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.Bedtime,
+                                    contentDescription = null,
+                                    tint = if (isSleepActive) MintElectric else MaterialTheme.colorScheme.onSurface
+                                )
+                            },
+                            onClick = {
+                                showMoreMenu = false
+                                showSleepTimerSheet = true
+                            },
+                            modifier = Modifier.testTag("more_menu_sleep_timer")
+                        )
+
+                        HorizontalDivider(
+                            modifier = Modifier.padding(vertical = 4.dp),
+                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
+                        )
+
+                        DropdownMenuItem(
+                            text = { Text("Visualizer Studio") },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.GraphicEq,
+                                    contentDescription = null
+                                )
+                            },
+                            onClick = {
+                                showMoreMenu = false
+                                onOpenVisualizerSettings()
+                            },
+                            modifier = Modifier.testTag("more_menu_visualizer")
+                        )
+
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = if (isRoomActive) "Open PulseRoom" else "Start PulseRoom"
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.Radio,
+                                    contentDescription = null,
+                                    tint = if (isRoomActive) MintElectric else MaterialTheme.colorScheme.onSurface
+                                )
+                            },
+                            onClick = {
+                                showMoreMenu = false
+                                if (!isSignedIn) {
+                                    onRequestSignIn("PulseRooms co-listening")
+                                } else if (activePulseRoom != null && activePulseRoom.active) {
+                                    onOpenPulseRoom(activePulseRoom)
+                                } else {
+                                    showCreateRoomDialog = true
+                                }
+                            },
+                            modifier = Modifier.testTag("more_menu_pulseroom")
+                        )
+                    }
                 }
             }
         }
@@ -343,7 +512,6 @@ fun NowPlayingScreen(
                 visualizerConfig = visualizerConfig,
                 visualizerParticleMotionScale = visualizerParticleMotionScale,
                 visualizerIntensityScale = visualizerIntensityScale,
-                downloadProgress = downloadProgress,
                 onTogglePlayPause = onTogglePlayPause,
                 onSeekTo = onSeekTo,
                 onSkipNext = onSkipNext,
@@ -351,9 +519,6 @@ fun NowPlayingScreen(
                 onToggleShuffle = onToggleShuffle,
                 onCycleRepeat = onCycleRepeat,
                 onToggleLike = { onToggleLike(track) },
-                onDownloadClick = { onDownloadClick(track) },
-                onOpenQueue = { showQueueSheet = true },
-                onOpenSleepTimer = { showSleepTimerSheet = true },
                 onConnectYouTube = onConnectYouTube,
                 onRetryPlayback = onRetryPlayback
             )
@@ -422,6 +587,19 @@ fun NowPlayingScreen(
             onDismiss = { showSleepTimerSheet = false }
         )
     }
+
+    if (showEqualizerSheet) {
+        QuickEqualizerSheet(
+            playbackState = playbackState,
+            onToggleEqEnabled = onToggleEqEnabled,
+            onSelectPreset = onSelectEqPreset,
+            onUpdateBand = onUpdateEqBand,
+            onUpdateBassBoost = onUpdateEqBassBoost,
+            onUpdateReverbPreset = onUpdateEqReverb,
+            onResetEqualizer = onResetEqualizer,
+            onDismiss = { showEqualizerSheet = false }
+        )
+    }
 }
 
 @Composable
@@ -433,7 +611,6 @@ private fun PlayerTab(
     visualizerConfig: VisualizerRenderConfig,
     visualizerParticleMotionScale: Float,
     visualizerIntensityScale: Float,
-    downloadProgress: Float?,
     onTogglePlayPause: () -> Unit,
     onSeekTo: (Long) -> Unit,
     onSkipNext: () -> Unit,
@@ -441,9 +618,6 @@ private fun PlayerTab(
     onToggleShuffle: () -> Unit,
     onCycleRepeat: () -> Unit,
     onToggleLike: () -> Unit,
-    onDownloadClick: () -> Unit,
-    onOpenQueue: () -> Unit,
-    onOpenSleepTimer: () -> Unit,
     onConnectYouTube: () -> Unit,
     onRetryPlayback: () -> Unit
 ) {
@@ -1241,6 +1415,68 @@ private fun QuickSleepTimerSheet(
             }
 
             Spacer(Modifier.height(10.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun QuickEqualizerSheet(
+    playbackState: PlaybackUiState,
+    onToggleEqEnabled: (Boolean) -> Unit,
+    onSelectPreset: (SoundscapePreset) -> Unit,
+    onUpdateBand: (Int, Int) -> Unit,
+    onUpdateBassBoost: (Int) -> Unit,
+    onUpdateReverbPreset: (Int) -> Unit,
+    onResetEqualizer: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 18.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Equalizer & Sound",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.minimumInteractiveComponentSize()
+                ) {
+                    Icon(Icons.Rounded.Close, contentDescription = "Close equalizer")
+                }
+            }
+
+            EqualizerControlPanel(
+                eqEnabled = playbackState.eqEnabled,
+                activePreset = playbackState.activeSoundscape,
+                bandLevels = playbackState.bandLevels,
+                bassBoost = playbackState.bassBoost,
+                reverbPreset = playbackState.reverbPreset,
+                onToggleEqEnabled = onToggleEqEnabled,
+                onSelectPreset = onSelectPreset,
+                onUpdateBand = onUpdateBand,
+                onUpdateBassBoost = onUpdateBassBoost,
+                onUpdateReverbPreset = onUpdateReverbPreset,
+                onResetEqualizer = onResetEqualizer
+            )
+
+            Spacer(Modifier.height(14.dp))
         }
     }
 }

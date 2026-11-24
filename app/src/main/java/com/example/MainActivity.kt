@@ -930,7 +930,17 @@ private fun AuthenticatedPulseApp(
                         pulseViewModel.playTrack(selected, nowPlayingState.queue.ifEmpty { listOf(selected) })
                     },
                     onStartSleepTimer = { mins -> pulseViewModel.startSleepTimer(mins) },
-                    onCancelSleepTimer = { pulseViewModel.cancelSleepTimer() }
+                    onCancelSleepTimer = { pulseViewModel.cancelSleepTimer() },
+                    onToggleEqEnabled = { pulseViewModel.setEqualizerEnabled(it) },
+                    onSelectEqPreset = { pulseViewModel.applySoundscapePreset(it) },
+                    onUpdateEqBand = { idx, mb -> pulseViewModel.updateEqualizerBand(idx, mb) },
+                    onUpdateEqBassBoost = { pulseViewModel.updateBassBoost(it) },
+                    onUpdateEqReverb = { pulseViewModel.updateReverbPreset(it) },
+                    onResetEqualizer = { pulseViewModel.resetEqualizer() },
+                    onOpenVisualizerSettings = {
+                        showNowPlaying = false
+                        navController.navigate(VisualizerStudioRoute)
+                    }
                 )
             }
 
