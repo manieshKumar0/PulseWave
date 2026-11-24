@@ -65,6 +65,40 @@ val PlayfairDisplayFontFamily = FontFamily(
     )
 )
 
+@OptIn(ExperimentalTextApi::class)
+val FrauncesFontFamily = FontFamily(
+    Font(
+        resId = R.font.fraunces,
+        weight = FontWeight.Normal,
+        style = FontStyle.Normal,
+        variationSettings = FontVariation.Settings(FontVariation.weight(400))
+    ),
+    Font(
+        resId = R.font.fraunces,
+        weight = FontWeight.Medium,
+        style = FontStyle.Normal,
+        variationSettings = FontVariation.Settings(FontVariation.weight(500))
+    ),
+    Font(
+        resId = R.font.fraunces,
+        weight = FontWeight.SemiBold,
+        style = FontStyle.Normal,
+        variationSettings = FontVariation.Settings(FontVariation.weight(600))
+    ),
+    Font(
+        resId = R.font.fraunces,
+        weight = FontWeight.Bold,
+        style = FontStyle.Normal,
+        variationSettings = FontVariation.Settings(FontVariation.weight(700))
+    ),
+    Font(
+        resId = R.font.fraunces,
+        weight = FontWeight.ExtraBold,
+        style = FontStyle.Normal,
+        variationSettings = FontVariation.Settings(FontVariation.weight(800))
+    )
+)
+
 val PulseWaveTypography = Typography(
     displayLarge = TextStyle(
         fontFamily = SpaceGroteskFontFamily,

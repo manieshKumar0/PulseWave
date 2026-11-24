@@ -1,14 +1,30 @@
 package com.example.ui.screens
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -71,7 +87,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
@@ -83,19 +98,32 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -103,6 +131,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.media3.common.Player
+import kotlinx.coroutines.launch
 import com.example.data.model.LyricLine
 import com.example.data.model.LyricNoteDoc
 import com.example.data.model.PulseRoomDoc
@@ -794,15 +823,18 @@ private fun PlayerTab(
         val sliderValue = draggingPos ?: playbackState.positionMs.toFloat().coerceIn(0f, duration.toFloat())
 
         Column(modifier = Modifier.fillMaxWidth()) {
-            Slider(
+            PulseSeekBar(
                 value = sliderValue,
+                maxValue = duration.toFloat(),
                 onValueChange = { draggingPos = it },
                 onValueChangeFinished = {
                     draggingPos?.let { onSeekTo(it.toLong()) }
                     draggingPos = null
                 },
-                valueRange = 0f..duration.toFloat(),
-                modifier = Modifier.fillMaxWidth().testTag("player_seek_slider")
+                activeColor = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("player_seek_slider")
             )
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -822,6 +854,24 @@ private fun PlayerTab(
         }
 
         // Transport Controls
+        val transportScope = rememberCoroutineScope()
+        val playInteractionSource = remember { MutableInteractionSource() }
+        val isPlayPressed by playInteractionSource.collectIsPressedAsState()
+        val playHoldScale by animateFloatAsState(
+            targetValue = if (isPlayPressed) 0.90f else 1f,
+            animationSpec = spring(dampingRatio = 0.6f, stiffness = 900f),
+            label = "play_hold_scale"
+        )
+        val playElevation by animateDpAsState(
+            targetValue = if (isPlayPressed) 3.dp else 10.dp,
+            animationSpec = spring(stiffness = 700f),
+            label = "play_elevation"
+        )
+        val playTapKick = remember { Animatable(1f) }
+        val playHaloAlpha = remember { Animatable(0f) }
+        val playHaloScale = remember { Animatable(1f) }
+        val visualPlayScale = if (isPlayPressed) playHoldScale else playTapKick.value
+
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -849,29 +899,85 @@ private fun PlayerTab(
             ) {
                 Icon(Icons.Rounded.SkipPrevious, contentDescription = "Previous track", modifier = Modifier.size(38.dp))
             }
-            Surface(
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier
-                    .size(72.dp)
-                    .clip(CircleShape)
-                    .clickable(onClick = onTogglePlayPause)
-                    .testTag("player_play_pause_button")
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier.size(72.dp)
             ) {
-                Box(contentAlignment = Alignment.Center) {
-                    if (playbackState.isBuffering) {
-                        CircularProgressIndicator(
-                            color = MaterialTheme.colorScheme.onPrimary,
-                            modifier = Modifier.size(28.dp),
-                            strokeWidth = 2.6.dp
-                        )
-                    } else {
-                        Icon(
-                            imageVector = if (playbackState.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                            contentDescription = if (playbackState.isPlaying) "Pause" else "Play",
-                            tint = MaterialTheme.colorScheme.onPrimary,
-                            modifier = Modifier.size(40.dp)
-                        )
+                Box(
+                    modifier = Modifier
+                        .size(72.dp)
+                        .graphicsLayer {
+                            scaleX = playHaloScale.value
+                            scaleY = playHaloScale.value
+                            alpha = playHaloAlpha.value
+                        }
+                        .border(2.dp, MaterialTheme.colorScheme.primary, CircleShape)
+                )
+                Surface(
+                    onClick = {
+                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        transportScope.launch {
+                            playTapKick.snapTo(0.88f)
+                            playTapKick.animateTo(
+                                targetValue = 1f,
+                                animationSpec = spring(dampingRatio = 0.42f, stiffness = 500f)
+                            )
+                        }
+                        transportScope.launch {
+                            playHaloAlpha.snapTo(0.50f)
+                            playHaloScale.snapTo(0.94f)
+                            launch {
+                                playHaloScale.animateTo(
+                                    targetValue = 1.36f,
+                                    animationSpec = tween(durationMillis = 320, easing = FastOutSlowInEasing)
+                                )
+                            }
+                            playHaloAlpha.animateTo(
+                                targetValue = 0f,
+                                animationSpec = tween(durationMillis = 320)
+                            )
+                        }
+                        onTogglePlayPause()
+                    },
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.primary,
+                    shadowElevation = playElevation,
+                    interactionSource = playInteractionSource,
+                    modifier = Modifier
+                        .size(72.dp)
+                        .graphicsLayer {
+                            scaleX = visualPlayScale
+                            scaleY = visualPlayScale
+                        }
+                        .testTag("player_play_pause_button")
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        AnimatedContent(
+                            targetState = playbackState.isBuffering to playbackState.isPlaying,
+                            transitionSpec = {
+                                (scaleIn(
+                                    initialScale = 0.72f,
+                                    animationSpec = spring(dampingRatio = 0.52f, stiffness = 620f)
+                                ) + fadeIn(tween(110))) togetherWith
+                                    (scaleOut(targetScale = 0.72f, animationSpec = tween(90)) + fadeOut(tween(90)))
+                            },
+                            label = "play_pause_icon_morph"
+                        ) { (buffering, playing) ->
+                            if (buffering) {
+                                CircularProgressIndicator(
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                    modifier = Modifier.size(28.dp),
+                                    strokeWidth = 2.6.dp
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                    contentDescription = if (playing) "Pause" else "Play",
+                                    tint = MaterialTheme.colorScheme.onPrimary,
+                                    modifier = Modifier.size(40.dp)
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -907,6 +1013,172 @@ private fun PlayerTab(
                 )
             }
         }
+        }
+    }
+}
+
+@Composable
+private fun PulseSeekBar(
+    value: Float,
+    maxValue: Float,
+    onValueChange: (Float) -> Unit,
+    onValueChangeFinished: () -> Unit,
+    activeColor: Color,
+    modifier: Modifier = Modifier
+) {
+    val safeMax = maxValue.coerceAtLeast(1f)
+    val fraction = (value / safeMax).coerceIn(0f, 1f)
+    val haptics = LocalHapticFeedback.current
+    val density = LocalDensity.current
+    val isDarkSurface = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+    val inactiveTrackColor = if (isDarkSurface) {
+        Color.Black.copy(alpha = 0.36f)
+    } else {
+        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.14f)
+    }
+
+    var trackWidthPx by remember { mutableIntStateOf(0) }
+    var isPressed by remember { mutableStateOf(false) }
+    var isDragging by remember { mutableStateOf(false) }
+    val isInteracting = isPressed || isDragging
+
+    val thumbWidthDp by animateDpAsState(
+        targetValue = if (isInteracting) 7.dp else 5.5.dp,
+        animationSpec = spring(dampingRatio = 0.55f, stiffness = 700f),
+        label = "seekbar_thumb_width"
+    )
+    val thumbHeightDp by animateDpAsState(
+        targetValue = if (isInteracting) 29.dp else 24.dp,
+        animationSpec = spring(dampingRatio = 0.55f, stiffness = 700f),
+        label = "seekbar_thumb_height"
+    )
+
+    val latestOnValueChange by rememberUpdatedState(onValueChange)
+    val latestOnFinished by rememberUpdatedState(onValueChangeFinished)
+    val latestMax by rememberUpdatedState(safeMax)
+
+    fun valueForX(x: Float): Float {
+        val totalW = trackWidthPx.toFloat().coerceAtLeast(1f)
+        val thumbPx = with(density) { thumbWidthDp.toPx() }
+        val usable = (totalW - thumbPx).coerceAtLeast(1f)
+        val frac = ((x - thumbPx / 2f) / usable).coerceIn(0f, 1f)
+        return frac * latestMax
+    }
+
+    Box(
+        modifier = modifier
+            .height(48.dp)
+            .onSizeChanged { trackWidthPx = it.width }
+            .semantics {
+                progressBarRangeInfo = ProgressBarRangeInfo(
+                    current = value.coerceIn(0f, safeMax),
+                    range = 0f..safeMax
+                )
+                setProgress { targetValue ->
+                    latestOnValueChange(targetValue.coerceIn(0f, safeMax))
+                    latestOnFinished()
+                    true
+                }
+            }
+            .pointerInput(safeMax) {
+                detectTapGestures(
+                    onPress = {
+                        isPressed = true
+                        tryAwaitRelease()
+                        isPressed = false
+                    },
+                    onTap = { offset ->
+                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        latestOnValueChange(valueForX(offset.x))
+                        latestOnFinished()
+                    }
+                )
+            }
+            .pointerInput(safeMax) {
+                detectHorizontalDragGestures(
+                    onDragStart = { offset ->
+                        isDragging = true
+                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        latestOnValueChange(valueForX(offset.x))
+                    },
+                    onDragEnd = {
+                        isDragging = false
+                        latestOnFinished()
+                    },
+                    onDragCancel = {
+                        isDragging = false
+                        latestOnFinished()
+                    },
+                    onHorizontalDrag = { change, _ ->
+                        change.consume()
+                        latestOnValueChange(valueForX(change.position.x))
+                    }
+                )
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val trackH = 11.dp.toPx()
+            val trackTop = (size.height - trackH) / 2f
+            val trackRadius = trackH / 2f
+            val thumbW = thumbWidthDp.toPx()
+            val thumbH = thumbHeightDp.toPx()
+            val thumbHalfW = thumbW / 2f
+            val thumbRadius = thumbW / 2f
+            val thumbCenterX = (thumbHalfW + fraction * (size.width - thumbW))
+                .coerceIn(thumbHalfW, (size.width - thumbHalfW).coerceAtLeast(thumbHalfW))
+
+            val trackPath = Path().apply {
+                addRoundRect(
+                    RoundRect(
+                        left = 0f,
+                        top = trackTop,
+                        right = size.width,
+                        bottom = trackTop + trackH,
+                        cornerRadius = CornerRadius(trackRadius, trackRadius)
+                    )
+                )
+            }
+
+            // Full inactive bar
+            drawPath(
+                path = trackPath,
+                color = inactiveTrackColor
+            )
+
+            // Active progress bar clipped cleanly inside outer pill caps, flush with thumb center
+            clipPath(trackPath) {
+                drawRect(
+                    color = activeColor,
+                    topLeft = Offset(0f, trackTop),
+                    size = Size(width = thumbCenterX, height = trackH)
+                )
+            }
+
+            val thumbLeft = thumbCenterX - thumbHalfW
+            val thumbTop = (size.height - thumbH) / 2f
+
+            // Subtle lifted drop shadow behind vertical pill thumb
+            drawRoundRect(
+                color = Color.Black.copy(alpha = 0.22f),
+                topLeft = Offset(thumbLeft - 1.dp.toPx(), thumbTop + 1.dp.toPx()),
+                size = Size(thumbW + 2.dp.toPx(), thumbH + 1.dp.toPx()),
+                cornerRadius = CornerRadius(thumbRadius + 1.dp.toPx(), thumbRadius + 1.dp.toPx())
+            )
+            drawRoundRect(
+                color = Color.Black.copy(alpha = 0.28f),
+                topLeft = Offset(thumbLeft - 0.5.dp.toPx(), thumbTop + 0.5.dp.toPx()),
+                size = Size(thumbW + 1.dp.toPx(), thumbH + 0.5.dp.toPx()),
+                cornerRadius = CornerRadius(thumbRadius + 0.5.dp.toPx(), thumbRadius + 0.5.dp.toPx())
+            )
+
+            // Vertical rounded-pill thumb
+            drawRoundRect(
+                color = activeColor,
+                topLeft = Offset(thumbLeft, thumbTop),
+                size = Size(thumbW, thumbH),
+                cornerRadius = CornerRadius(thumbRadius, thumbRadius)
+            )
         }
     }
 }
