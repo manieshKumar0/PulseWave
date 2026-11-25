@@ -123,6 +123,10 @@ class PlaybackController internal constructor(
     private var activeCorrelationId: String = "pb-0"
     @Volatile
     private var hasHandedUriForCurrentAttempt: Boolean = false
+    @Volatile
+    private var isResolvingRemoteTrack: Boolean = false
+    @Volatile
+    private var awaitingMedia3TrackId: String? = null
 
     private companion object {
         const val SMART_PAUSE_FADE_OUT_MS = 460L
@@ -246,7 +250,8 @@ class PlaybackController internal constructor(
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 _state.update {
-                    val resolvingActive = resolvePlayJob?.isActive == true && it.playbackError == null
+                    val resolvingActive = (isResolvingRemoteTrack || resolvePlayJob?.isActive == true) &&
+                        it.playbackError == null
                     it.copy(
                         isBuffering = (playbackState == Player.STATE_BUFFERING) || resolvingActive,
                         durationMs = controller.duration.takeIf { d -> d > 0L }
@@ -266,17 +271,43 @@ class PlaybackController internal constructor(
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                // Clearing the player before loading a newly selected track emits
+                // onMediaItemTransition(null, PLAYLIST_CHANGED) with currentMediaItemIndex = 0.
+                // Never fall back to queue[0] or overwrite the pending track when nothing is loaded.
+                if (mediaItem == null || controller.mediaItemCount == 0) {
+                    return
+                }
+                val pendingTrackId = awaitingMedia3TrackId
+                if (pendingTrackId != null) {
+                    if (mediaItem.mediaId != pendingTrackId) {
+                        return
+                    }
+                    awaitingMedia3TrackId = null
+                }
+                if ((isResolvingRemoteTrack || resolvePlayJob?.isActive == true) &&
+                    !hasHandedUriForCurrentAttempt &&
+                    mediaItem.mediaId != _state.value.currentTrack?.id
+                ) {
+                    return
+                }
                 val isSameTrackPlaylistUpdate =
                     reason == Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED &&
-                        mediaItem?.mediaId != null &&
                         mediaItem.mediaId == lastTrackId
-                if (lastTrackId != null && lastTrackId != mediaItem?.mediaId) {
+                if (lastTrackId != null && lastTrackId != mediaItem.mediaId) {
                     recordTrackSignal(completed = false)
                 }
-                val idx = controller.currentMediaItemIndex
                 val queue = _state.value.queue
-                val nextTrack = queue.getOrNull(idx)
-                    ?: mediaItem?.let { PulseMediaItemMapper.fromMediaItem(it) }
+                val matchedIdx = queue.indexOfFirst { it.id == mediaItem.mediaId }
+                val idx = if (matchedIdx >= 0) {
+                    matchedIdx
+                } else {
+                    controller.currentMediaItemIndex.coerceAtLeast(0)
+                }
+                val nextTrack = if (matchedIdx >= 0) {
+                    queue[matchedIdx]
+                } else {
+                    PulseMediaItemMapper.fromMediaItem(mediaItem) ?: queue.getOrNull(idx)
+                }
                 if (nextTrack != null) {
                     if (!isSameTrackPlaylistUpdate) {
                         lastTrackId = nextTrack.id
@@ -433,7 +464,9 @@ class PlaybackController internal constructor(
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                if (resolvePlayJob?.isActive == true && !hasHandedUriForCurrentAttempt) {
+                if ((isResolvingRemoteTrack || resolvePlayJob?.isActive == true || awaitingMedia3TrackId != null) &&
+                    !hasHandedUriForCurrentAttempt
+                ) {
                     return
                 }
                 val rootCause = generateSequence(error as Throwable?) { it.cause }.lastOrNull()
@@ -593,7 +626,7 @@ class PlaybackController internal constructor(
             while (true) {
                 val controller = mediaController
                 val hasError = _state.value.playbackError != null
-                val resolving = resolvePlayJob?.isActive == true
+                val resolving = isResolvingRemoteTrack || resolvePlayJob?.isActive == true
                 val fadingOut = isFadingOutToPause
                 val rawPlaying = !hasError && !resolving && controller?.isPlaying == true
                 val playing = rawPlaying && !fadingOut
@@ -790,7 +823,8 @@ class PlaybackController internal constructor(
         _state.update { it.copy(isPlaying = false) }
         val startVolume = controller.volume.coerceIn(0.05f, 1f)
         val startedAt = SystemClock.elapsedRealtime()
-        pauseFadeJob = scope.launch {
+        lateinit var job: Job
+        job = scope.launch {
             try {
                 while (isActive) {
                     val activeController = mediaController
@@ -820,11 +854,14 @@ class PlaybackController internal constructor(
                     }
                 }
             } finally {
-                isFadingOutToPause = false
-                pauseRequestedBySmartFade = false
-                pauseFadeJob = null
+                if (pauseFadeJob === job) {
+                    isFadingOutToPause = false
+                    pauseRequestedBySmartFade = false
+                    pauseFadeJob = null
+                }
             }
         }
+        pauseFadeJob = job
     }
 
     fun startSleepTimer(minutes: Int) {
@@ -937,6 +974,9 @@ class PlaybackController internal constructor(
             track.playableUri.startsWith("pulseyt://") &&
             track.youtubeVideoId != null
 
+        isResolvingRemoteTrack = needsRemoteResolution
+        awaitingMedia3TrackId = track.id
+
         _state.update {
             it.copy(
                 currentTrack = track,
@@ -953,6 +993,7 @@ class PlaybackController internal constructor(
         }
 
         runOnPlayerThread {
+            if (requestGeneration != playRequestGeneration.get()) return@runOnPlayerThread
             val controller = mediaController
             if (controller == null) {
                 pendingPlayRequest = PendingPlayRequest(track, safeQueue, forceRefresh)
@@ -961,8 +1002,15 @@ class PlaybackController internal constructor(
             }
 
             if (!needsRemoteResolution) {
-                val mediaItems = safeQueue.mapNotNull { it.toMediaItemOrNull() }
-                if (mediaItems.isEmpty()) {
+                val resolvedPairs = safeQueue.mapNotNull { item ->
+                    item.toMediaItemOrNull()?.let { item to it }
+                }
+                val playableQueue = resolvedPairs.map { it.first }
+                val mediaItems = resolvedPairs.map { it.second }
+                val safeIdx = playableQueue.indexOfFirst { it.id == track.id }
+                if (mediaItems.isEmpty() || safeIdx < 0) {
+                    isResolvingRemoteTrack = false
+                    awaitingMedia3TrackId = null
                     controller.pause()
                     controller.stop()
                     controller.clearMediaItems()
@@ -971,9 +1019,12 @@ class PlaybackController internal constructor(
                     }
                     return@runOnPlayerThread
                 }
-                val safeIdx = targetIndex.coerceIn(0, mediaItems.lastIndex)
+                if (playableQueue.size != safeQueue.size) {
+                    _state.update { it.copy(queue = playableQueue, currentIndex = safeIdx) }
+                }
                 triggerFadeInIfEnabled(controller)
                 controller.setMediaItems(mediaItems, safeIdx, 0L)
+                awaitingMedia3TrackId = null
                 controller.prepare()
                 controller.play()
                 return@runOnPlayerThread
@@ -1030,6 +1081,8 @@ class PlaybackController internal constructor(
                         "PULSE_YT_RESOLVER",
                         "stage_event corr=$corrId stage=PLAYBACK_REQUEST trackId=${track.id} videoId=$videoId startTsMs=$reqStartTsMs endTsMs=$endTsMs durationMs=$elapsedMs outcome=${if (timedOut) "TIMEOUT" else "FAILURE"} errorClass=${rawErr?.javaClass?.simpleName ?: "None"} rootCauseClass=${rawErr?.cause?.javaClass?.simpleName ?: "None"} httpStatus=$httpStatus usableStreamReturned=false isHls=false format=none cancelled=false timedOut=$timedOut failureOrigin=$origin phase=BEFORE_MEDIA3_HANDOFF msg=${YouTubeMusicClient.redactSensitiveUrls(errMsg)}"
                     )
+                    isResolvingRemoteTrack = false
+                    awaitingMedia3TrackId = null
                     _state.update {
                         it.copy(
                             isPlaying = false,
@@ -1043,8 +1096,8 @@ class PlaybackController internal constructor(
 
                 val resolvedMime = if (stream.isHls) MimeTypes.APPLICATION_M3U8 else null
                 youtubeClient.registerResolvedStreamHeaders(stream)
-                val mediaItems = safeQueue.mapIndexedNotNull { idx, item ->
-                    if (idx == targetIndex) {
+                val resolvedPairs = safeQueue.mapIndexedNotNull { idx, item ->
+                    val mi = if (idx == targetIndex) {
                         item.toMediaItemOrNull(
                             overrideUri = stream.url,
                             mimeType = resolvedMime
@@ -1052,12 +1105,18 @@ class PlaybackController internal constructor(
                     } else {
                         item.toMediaItemOrNull()
                     }
+                    mi?.let { item to it }
                 }
-                if (mediaItems.isEmpty()) {
+                val playableQueue = resolvedPairs.map { it.first }
+                val mediaItems = resolvedPairs.map { it.second }
+                val safeIdx = playableQueue.indexOfFirst { it.id == track.id }
+                if (mediaItems.isEmpty() || safeIdx < 0) {
                     Log.w(
                         "PULSE_YT_RESOLVER",
                         "stage_event corr=$corrId stage=PLAYBACK_REQUEST trackId=${track.id} videoId=$videoId startTsMs=$reqStartTsMs endTsMs=$endTsMs durationMs=$elapsedMs outcome=FAILURE errorClass=IllegalStateException httpStatus=0 usableStreamReturned=false isHls=${stream.isHls} format=${resolvedMime ?: stream.mimeType} cancelled=false timedOut=false failureOrigin=LOCAL_APP phase=BEFORE_MEDIA3_HANDOFF msg=empty_media_items"
                     )
+                    isResolvingRemoteTrack = false
+                    awaitingMedia3TrackId = null
                     _state.update {
                         it.copy(isPlaying = false, isBuffering = false, positionMs = 0L, playbackError = "No playable audio URI for this track")
                     }
@@ -1065,19 +1124,25 @@ class PlaybackController internal constructor(
                 }
                 val controller = mediaController
                 if (controller == null) {
+                    isResolvingRemoteTrack = false
                     pendingPlayRequest = PendingPlayRequest(track, safeQueue, forceRefresh = false)
                     connectController()
                     return@launch
                 }
-                val safeIdx = targetIndex.coerceIn(0, mediaItems.lastIndex)
+                isResolvingRemoteTrack = false
                 hasHandedUriForCurrentAttempt = true
+                if (playableQueue.size != safeQueue.size) {
+                    _state.update { it.copy(queue = playableQueue, currentIndex = safeIdx) }
+                }
                 Log.i(
                     "PULSE_YT_RESOLVER",
                     "stage_event corr=$corrId stage=MEDIA3_HANDOFF source=PLAY_TRACK trackId=${track.id} videoId=$videoId startTsMs=$reqStartTsMs endTsMs=$endTsMs durationMs=$elapsedMs outcome=SUCCESS isHls=${stream.isHls} format=${resolvedMime ?: stream.mimeType} host=${YouTubeMusicClient.redactHostOnly(stream.url)} queueIndex=$safeIdx queueSize=${mediaItems.size}"
                 )
                 runOnPlayerThread {
+                    if (requestGeneration != playRequestGeneration.get()) return@runOnPlayerThread
                     triggerFadeInIfEnabled(controller)
                     controller.setMediaItems(mediaItems, safeIdx, 0L)
+                    awaitingMedia3TrackId = null
                     controller.prepare()
                     controller.play()
                 }
@@ -1089,6 +1154,8 @@ class PlaybackController internal constructor(
                     "stage_event corr=$corrId stage=PLAYBACK_REQUEST trackId=${track.id} videoId=$videoId startTsMs=$reqStartTsMs endTsMs=$endTsMs durationMs=$elapsedMs outcome=CANCELLED errorClass=CancellationException rootCauseClass=${e.cause?.javaClass?.simpleName ?: "None"} httpStatus=0 usableStreamReturned=false isHls=false format=none cancelled=true timedOut=false failureOrigin=LOCAL_APP phase=BEFORE_MEDIA3_HANDOFF"
                 )
                 if (requestGeneration == playRequestGeneration.get()) {
+                    isResolvingRemoteTrack = false
+                    awaitingMedia3TrackId = null
                     _state.update { current ->
                         if (current.isBuffering || current.isPlaying) {
                             current.copy(isPlaying = false, isBuffering = false)
@@ -1099,11 +1166,14 @@ class PlaybackController internal constructor(
                 }
                 throw e
             } finally {
-                if (requestGeneration == playRequestGeneration.get() &&
-                    !hasHandedUriForCurrentAttempt &&
-                    _state.value.isBuffering
-                ) {
-                    _state.update { it.copy(isBuffering = false) }
+                if (requestGeneration == playRequestGeneration.get()) {
+                    isResolvingRemoteTrack = false
+                    if (!hasHandedUriForCurrentAttempt) {
+                        awaitingMedia3TrackId = null
+                        if (_state.value.isBuffering) {
+                            _state.update { it.copy(isBuffering = false) }
+                        }
+                    }
                 }
             }
         }
@@ -1121,7 +1191,7 @@ class PlaybackController internal constructor(
             retryActiveTrack()
             return
         }
-        if (resolvePlayJob?.isActive == true) {
+        if (isResolvingRemoteTrack || resolvePlayJob?.isActive == true) {
             return
         }
         runOnPlayerThread {
@@ -1172,6 +1242,7 @@ class PlaybackController internal constructor(
     fun skipNext() {
         runOnPlayerThread {
             cancelPauseFadeOut(restoreVolume = true)
+            awaitingMedia3TrackId = null
             val controller = mediaController ?: return@runOnPlayerThread
             if (controller.hasNextMediaItem()) {
                 controller.seekToNextMediaItem()
@@ -1182,6 +1253,7 @@ class PlaybackController internal constructor(
     fun skipPrevious() {
         runOnPlayerThread {
             cancelPauseFadeOut(restoreVolume = true)
+            awaitingMedia3TrackId = null
             val controller = mediaController ?: return@runOnPlayerThread
             if (controller.currentPosition > 4_000L) {
                 seekBackCounter++
@@ -1509,6 +1581,8 @@ class PlaybackController internal constructor(
         playRequestGeneration.incrementAndGet()
         resolvePlayJob?.cancel()
         resolvePlayJob = null
+        isResolvingRemoteTrack = false
+        awaitingMedia3TrackId = null
         pauseFadeJob?.cancel()
         pauseFadeJob = null
         isFadingOutToPause = false

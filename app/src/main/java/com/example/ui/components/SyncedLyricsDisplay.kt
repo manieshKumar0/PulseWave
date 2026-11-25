@@ -3,8 +3,6 @@ package com.example.ui.components
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -16,10 +14,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -40,9 +36,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Shadow
-import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.testTag
@@ -57,7 +50,7 @@ import com.example.ui.theme.FrauncesFontFamily
 import com.example.ui.theme.UltravioletPulse
 
 /**
- * Snapshot of Media3 playback telemetry + BPM phase passed into beat-reactive lyric visuals.
+ * Snapshot of playback telemetry passed into the synced lyrics ambient backdrop.
  */
 @Immutable
 data class BeatReactiveLyricState(
@@ -71,44 +64,28 @@ data class BeatReactiveLyricState(
     val secondaryAccent: Color = UltravioletPulse
 )
 
-object SyncedLyricsTimeline {
-    private const val LOOKAHEAD_MS = 160L
+private const val LYRIC_LOOKAHEAD_MS = 160L
 
-    fun findActiveLineIndex(lines: List<LyricLine>, positionMs: Long): Int {
-        if (lines.isEmpty()) return -1
-        val target = positionMs + LOOKAHEAD_MS
-        var low = 0
-        var high = lines.lastIndex
-        var result = -1
-        while (low <= high) {
-            val mid = (low + high) ushr 1
-            if (lines[mid].timestampMs <= target) {
-                result = mid
-                low = mid + 1
-            } else {
-                high = mid - 1
-            }
+private fun findActiveLyricLineIndex(lines: List<LyricLine>, positionMs: Long): Int {
+    if (lines.isEmpty()) return -1
+    val target = positionMs + LYRIC_LOOKAHEAD_MS
+    var low = 0
+    var high = lines.lastIndex
+    var result = -1
+    while (low <= high) {
+        val mid = (low + high) ushr 1
+        if (lines[mid].timestampMs <= target) {
+            result = mid
+            low = mid + 1
+        } else {
+            high = mid - 1
         }
-        return result
     }
-
-    fun computeLineProgress(
-        lines: List<LyricLine>,
-        activeIndex: Int,
-        positionMs: Long,
-        totalDurationMs: Long
-    ): Float {
-        if (activeIndex !in lines.indices) return 0f
-        val start = lines[activeIndex].timestampMs
-        val end = lines.getOrNull(activeIndex + 1)?.timestampMs
-            ?: totalDurationMs.coerceAtLeast(start + 3_500L)
-        val span = (end - start).coerceAtLeast(300L)
-        return ((positionMs - start).toFloat() / span.toFloat()).coerceIn(0f, 1f)
-    }
+    return result
 }
 
 /**
- * Clean song-reactive ambient backdrop behind synced lyrics.
+ * Clean song-colored ambient glow behind the 3-line lyric stage.
  */
 @Composable
 fun BeatReactiveLyricBackdrop(
@@ -125,11 +102,6 @@ fun BeatReactiveLyricBackdrop(
         animationSpec = tween(durationMillis = 550),
         label = "lyric_bg_secondary"
     )
-    val smoothedEnergy by animateFloatAsState(
-        targetValue = if (beatState.isPlaying) beatState.beatEnergy else 0.18f,
-        animationSpec = spring(dampingRatio = 0.72f, stiffness = 360f),
-        label = "lyric_backdrop_energy"
-    )
 
     Canvas(modifier = modifier) {
         val w = size.width
@@ -138,12 +110,12 @@ fun BeatReactiveLyricBackdrop(
 
         // Soft song-colored ambient glow centered directly behind the active middle lyric line
         val center = Offset(w * 0.5f, h * 0.5f)
-        val centerRadius = size.maxDimension * (0.50f + 0.10f * smoothedEnergy)
+        val centerRadius = size.maxDimension * 0.52f
         drawCircle(
             brush = Brush.radialGradient(
                 colors = listOf(
-                    animatedPrimary.copy(alpha = 0.28f + 0.10f * smoothedEnergy),
-                    animatedSecondary.copy(alpha = 0.10f),
+                    animatedPrimary.copy(alpha = 0.24f),
+                    animatedSecondary.copy(alpha = 0.08f),
                     Color.Transparent
                 ),
                 center = center,
@@ -172,9 +144,9 @@ fun BeatReactiveLyricBackdrop(
 
 /**
  * Focused 3-line synced lyrics stage:
- * - Only the previous, active center, and next lyric lines are displayed
- * - Center line is sharp, large, centered, and glowing in the song's accent palette
- * - Top & bottom lines are softly blurred and dimmed so focus stays locked on the active line
+ * - Shows only 3 lines at a time: previous (top, blurred), active (center, big & sharp), next (bottom, blurred)
+ * - Uses bold Fraunces display typography for the focused center lyric line
+ * - Tap any visible line to seek directly to its timestamp
  */
 @Composable
 fun SyncedLyricsDisplay(
@@ -187,7 +159,7 @@ fun SyncedLyricsDisplay(
     emptyContent: @Composable () -> Unit = {}
 ) {
     val activeIndex by remember(lines, beatState.positionMs) {
-        derivedStateOf { SyncedLyricsTimeline.findActiveLineIndex(lines, beatState.positionMs) }
+        derivedStateOf { findActiveLyricLineIndex(lines, beatState.positionMs) }
     }
 
     val animatedAccent by animateColorAsState(
@@ -274,12 +246,11 @@ fun SyncedLyricsDisplay(
                         }
                     }
 
-                    // Center slot: Active line (sharp, big, bold Fraunces editorial font)
+                    // Center slot: Active line (sharp, big, bold Fraunces font)
                     FocusedCenterLyricLine(
                         index = focusIdx,
                         line = centerLine,
-                        beatEnergy = beatState.beatEnergy,
-                        isPlaying = beatState.isPlaying,
+                        isIntroWaiting = activeIndex < 0,
                         accentColor = animatedAccent,
                         pinnedNotes = pinnedNotes,
                         onClick = { onSeekTo(centerLine.timestampMs) }
@@ -311,29 +282,22 @@ fun SyncedLyricsDisplay(
 private fun FocusedCenterLyricLine(
     index: Int,
     line: LyricLine,
-    beatEnergy: Float,
-    isPlaying: Boolean,
+    isIntroWaiting: Boolean,
     accentColor: Color,
     pinnedNotes: List<LyricNoteDoc>,
     onClick: () -> Unit
 ) {
     val isDarkSurface = MaterialTheme.colorScheme.surface.luminance() < 0.5f
 
-    val targetScale = if (isPlaying) {
-        1.0f + (beatEnergy * 0.025f)
+    val activeTextColor = if (isDarkSurface) {
+        lerp(accentColor, Color(0xFFFFF5E4), 0.46f)
     } else {
-        1.0f
+        lerp(accentColor, MaterialTheme.colorScheme.onSurface, 0.20f)
     }
-    val animatedScale by animateFloatAsState(
-        targetValue = targetScale,
-        animationSpec = spring(dampingRatio = 0.72f, stiffness = 360f),
-        label = "center_lyric_scale"
-    )
-
-    val activeColor = if (isDarkSurface) {
-        lerp(accentColor, Color(0xFFFFF1DC), 0.34f)
+    val introTextColor = if (isDarkSurface) {
+        lerp(accentColor, Color.White, 0.25f).copy(alpha = 0.72f)
     } else {
-        lerp(accentColor, MaterialTheme.colorScheme.onSurface, 0.16f)
+        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
     }
 
     val centerTextStyle = MaterialTheme.typography.headlineMedium.copy(
@@ -341,22 +305,12 @@ private fun FocusedCenterLyricLine(
         fontWeight = FontWeight.Bold,
         fontSize = 27.sp,
         lineHeight = 35.sp,
-        letterSpacing = (-0.3).sp,
-        shadow = Shadow(
-            color = accentColor.copy(alpha = if (isDarkSurface) 0.55f else 0.28f),
-            offset = Offset.Zero,
-            blurRadius = if (isPlaying) 22f + (beatEnergy * 8f) else 16f
-        )
+        letterSpacing = (-0.3).sp
     )
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .graphicsLayer {
-                scaleX = animatedScale
-                scaleY = animatedScale
-                transformOrigin = TransformOrigin.Center
-            }
             .clip(RoundedCornerShape(16.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 8.dp, vertical = 10.dp)
@@ -367,7 +321,7 @@ private fun FocusedCenterLyricLine(
         Text(
             text = line.text,
             style = centerTextStyle,
-            color = activeColor,
+            color = if (isIntroWaiting) introTextColor else activeTextColor,
             textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth()
         )

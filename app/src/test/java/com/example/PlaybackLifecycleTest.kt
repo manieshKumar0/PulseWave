@@ -1024,6 +1024,182 @@ class PlaybackLifecycleTest {
         controller.release()
     }
 
+    @Test
+    fun oneClickTrackSwitch_realExoPlayer_youtubeAndLocalSwitchingWorksOnFirstClick() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val exoPlayer = androidx.media3.exoplayer.ExoPlayer.Builder(context).build()
+        val ytClient = YouTubeMusicClient(
+            internalStageResolver = { videoId, _, _ ->
+                Result.success(fakeStream("https://cdn.example.com/$videoId/stream.m4a"))
+            }
+        )
+        val controller = PlaybackController(
+            context = context,
+            signalDao = NoOpSignalDao(),
+            youtubeClient = ytClient,
+            injectedPlayer = exoPlayer,
+            autoConnectController = false
+        )
+
+        val ytA = Track(id = "yt_AAAAAAAAAAA", title = "Song A", artist = "Artist A", sourceType = TrackSourceType.YOUTUBE)
+        val ytB = Track(id = "yt_BBBBBBBBBBB", title = "Song B", artist = "Artist B", sourceType = TrackSourceType.YOUTUBE)
+        val localC = Track(
+            id = "local_CCCCCCCC",
+            title = "Local C",
+            artist = "Artist C",
+            localUri = "content://media/external/audio/media/901",
+            sourceType = TrackSourceType.LOCAL_SAF
+        )
+        val unplayable = Track(id = "broken_0", title = "Broken", artist = "None", sourceType = TrackSourceType.LOCAL_SAF)
+        // Simulate Room ordering where the recently played track (ytA) is at index 0
+        val queue = listOf(ytA, unplayable, ytB, localC)
+
+        // Click 1: Play Song A initially
+        controller.playTrack(ytA, queue)
+        val d1 = System.currentTimeMillis() + 3_000L
+        while (exoPlayer.mediaItemCount == 0 && System.currentTimeMillis() < d1) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(10)
+        }
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(ytA.id, controller.state.value.currentTrack?.id)
+        assertEquals(3, exoPlayer.mediaItemCount)
+        assertEquals(0, exoPlayer.currentMediaItemIndex)
+        assertTrue(exoPlayer.playWhenReady)
+
+        // Click 1 on Song B while Song A is active -> MUST switch to Song B on first click!
+        controller.playTrack(ytB, queue)
+        val d2 = System.currentTimeMillis() + 3_000L
+        while ((exoPlayer.mediaItemCount == 0 || exoPlayer.currentMediaItem?.mediaId != ytB.id) &&
+            System.currentTimeMillis() < d2
+        ) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(10)
+        }
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals("Song B must remain active on 1st click", ytB.id, controller.state.value.currentTrack?.id)
+        assertEquals("ExoPlayer must load Song B on 1st click", ytB.id, exoPlayer.currentMediaItem?.mediaId)
+        assertEquals(1, exoPlayer.currentMediaItemIndex)
+        assertTrue(exoPlayer.playWhenReady)
+
+        // Pause Song B (start smart pause fade-out or paused state), then click Local C once -> MUST switch and play!
+        exoPlayer.pause()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertFalse(exoPlayer.playWhenReady)
+
+        controller.playTrack(localC, queue)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(localC.id, controller.state.value.currentTrack?.id)
+        assertEquals(localC.id, exoPlayer.currentMediaItem?.mediaId)
+        assertEquals(2, exoPlayer.currentMediaItemIndex)
+        assertTrue("Switching from paused song must start playback on 1st click", exoPlayer.playWhenReady)
+
+        // Switch from Local C -> YT A while playing -> MUST switch on 1st click!
+        controller.playTrack(ytA, queue)
+        val d3 = System.currentTimeMillis() + 3_000L
+        while ((exoPlayer.mediaItemCount == 0 || exoPlayer.currentMediaItem?.mediaId != ytA.id) &&
+            System.currentTimeMillis() < d3
+        ) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(10)
+        }
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(ytA.id, controller.state.value.currentTrack?.id)
+        assertEquals(ytA.id, exoPlayer.currentMediaItem?.mediaId)
+        assertEquals(0, exoPlayer.currentMediaItemIndex)
+        assertTrue(exoPlayer.playWhenReady)
+
+        controller.release()
+        exoPlayer.release()
+    }
+
+    @Test
+    fun oneClickTrackSwitch_realMediaSessionController_largeLocalQueue() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val exoPlayer = androidx.media3.exoplayer.ExoPlayer.Builder(context).build()
+        val session = androidx.media3.session.MediaSession.Builder(context, exoPlayer)
+            .setId("test_session_${System.nanoTime()}")
+            .build()
+        val mediaControllerFuture = androidx.media3.session.MediaController.Builder(context, session.token)
+            .setApplicationLooper(Looper.getMainLooper())
+            .buildAsync()
+        while (!mediaControllerFuture.isDone) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(5)
+        }
+        val mediaController = mediaControllerFuture.get()
+        val ytClient = YouTubeMusicClient(
+            internalStageResolver = { videoId, _, _ ->
+                Result.success(fakeStream("https://cdn.example.com/$videoId/stream.m4a"))
+            }
+        )
+        val controller = PlaybackController(
+            context = context,
+            signalDao = NoOpSignalDao(),
+            youtubeClient = ytClient,
+            injectedPlayer = mediaController,
+            autoConnectController = false
+        )
+
+        val tracks = (0 until 627).map { i ->
+            Track(
+                id = "device_ms_$i",
+                title = "Device Song $i",
+                artist = "Artist $i",
+                localUri = "content://media/external/audio/media/$i",
+                sourceType = TrackSourceType.LOCAL_SAF
+            )
+        }
+        val ytTrack = Track(
+            id = "yt_MS_1234567",
+            title = "YouTube Track",
+            artist = "Artist YT",
+            sourceType = TrackSourceType.YOUTUBE
+        )
+
+        // Click 1: play track 0
+        controller.playTrack(tracks[0], tracks)
+        val d1 = System.currentTimeMillis() + 5_000L
+        while (exoPlayer.currentMediaItem?.mediaId != tracks[0].id && System.currentTimeMillis() < d1) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(10)
+        }
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(tracks[0].id, exoPlayer.currentMediaItem?.mediaId)
+        assertTrue(exoPlayer.playWhenReady)
+
+        // Switch while playing/loaded to track 42 on 1st click!
+        controller.playTrack(tracks[42], tracks)
+        val d2 = System.currentTimeMillis() + 5_000L
+        while (exoPlayer.currentMediaItem?.mediaId != tracks[42].id && System.currentTimeMillis() < d2) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(10)
+        }
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(tracks[42].id, controller.state.value.currentTrack?.id)
+        assertEquals(tracks[42].id, exoPlayer.currentMediaItem?.mediaId)
+
+        // Pause via controller, then switch to YouTube track in 1 click over MediaSession/MediaController!
+        controller.togglePlayPause()
+        shadowOf(Looper.getMainLooper()).idle()
+        controller.playTrack(ytTrack, listOf(tracks[42], ytTrack))
+        val d3 = System.currentTimeMillis() + 5_000L
+        while (exoPlayer.currentMediaItem?.mediaId != ytTrack.id && System.currentTimeMillis() < d3) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(10)
+        }
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(ytTrack.id, controller.state.value.currentTrack?.id)
+        assertEquals(ytTrack.id, exoPlayer.currentMediaItem?.mediaId)
+        assertTrue(exoPlayer.playWhenReady)
+
+        controller.release()
+        androidx.media3.session.MediaController.releaseFuture(mediaControllerFuture)
+        session.release()
+        exoPlayer.release()
+    }
+
     private fun fakeStream(url: String): ResolvedAudioStream = ResolvedAudioStream(
         url = url,
         mimeType = "audio/mp4",
@@ -1100,7 +1276,20 @@ class PlaybackLifecycleTest {
                     Unit
                 }
                 "clearMediaItems" -> {
+                    val hadItems = items.isNotEmpty()
                     items.clear()
+                    currentIndex = 0
+                    playbackState = Player.STATE_IDLE
+                    isPlaying = false
+                    playWhenReady = false
+                    if (hadItems) {
+                        listeners.forEach {
+                            it.onMediaItemTransition(
+                                null,
+                                Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED
+                            )
+                        }
+                    }
                     Unit
                 }
                 "prepare" -> {
