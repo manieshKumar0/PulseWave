@@ -824,9 +824,9 @@ class PulseViewModel(
                 libraryRepo.syncScannedDeviceTracks(scanned)
                 if (!silentIfNoPermission) {
                     _statusMessage.value = if (scanned.isNotEmpty()) {
-                        "Loaded ${scanned.size} device song(s) longer than 2 min"
+                        "Loaded ${scanned.size} Songs"
                     } else {
-                        "No songs longer than 2 minutes found on device"
+                        "No songs found on device"
                     }
                 }
             } catch (e: CancellationException) {

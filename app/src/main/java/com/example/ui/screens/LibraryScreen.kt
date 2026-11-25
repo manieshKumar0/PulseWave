@@ -174,23 +174,14 @@ fun LibraryScreen(
     val haptics = LocalHapticFeedback.current
     var showCreatePlaylistDialog by remember { mutableStateOf(false) }
 
-    LaunchedEffect(selectedFilter) {
-        if (selectedFilter == LibraryFilter.DEVICE) {
-            val permitted = SafMusicImporter.hasDeviceAudioPermission(context)
-            hasAudioPermission = permitted
-            if (permitted) {
-                onScanDeviceAudio(true)
-            }
-        }
-    }
-
     val currentSelectedFilter by rememberUpdatedState(selectedFilter)
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
+                val hadPermission = hasAudioPermission
                 val permitted = SafMusicImporter.hasDeviceAudioPermission(context)
                 hasAudioPermission = permitted
-                if (permitted && currentSelectedFilter == LibraryFilter.DEVICE) {
+                if (!hadPermission && permitted && currentSelectedFilter == LibraryFilter.DEVICE) {
                     onScanDeviceAudio(true)
                 }
             }
@@ -279,9 +270,7 @@ fun LibraryScreen(
                 if (filter == LibraryFilter.DEVICE) {
                     val permitted = SafMusicImporter.hasDeviceAudioPermission(context)
                     hasAudioPermission = permitted
-                    if (permitted) {
-                        onScanDeviceAudio(true)
-                    } else {
+                    if (!permitted) {
                         audioPermissionLauncher.launch(requiredAudioPermission)
                     }
                 }
@@ -451,7 +440,7 @@ fun LibraryScreen(
                                 color = MaterialTheme.colorScheme.primary
                             )
                         }
-                        OutlinedButton(
+                        Surface(
                             onClick = {
                                 if (SafMusicImporter.hasDeviceAudioPermission(context)) {
                                     onScanDeviceAudio(false)
@@ -460,24 +449,31 @@ fun LibraryScreen(
                                 }
                             },
                             enabled = !isScanningDeviceMusic,
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.72f),
+                            border = BorderStroke(
+                                1.dp,
+                                MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
+                            ),
                             modifier = Modifier
-                                .height(48.dp)
+                                .size(48.dp)
                                 .testTag("rescan_device_audio_button")
                         ) {
-                            if (isScanningDeviceMusic) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(16.dp),
-                                    strokeWidth = 2.dp
-                                )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Rounded.Refresh,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(18.dp)
-                                )
+                            Box(contentAlignment = Alignment.Center) {
+                                if (isScanningDeviceMusic) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Refresh,
+                                        contentDescription = stringResource(R.string.device_songs_rescan),
+                                        tint = MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
                             }
-                            Spacer(Modifier.width(6.dp))
-                            Text(stringResource(R.string.device_songs_rescan))
                         }
                     }
                 }
