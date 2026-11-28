@@ -82,7 +82,7 @@ fun ForYouScreen(
 ) {
     LazyColumn(
         modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 140.dp),
+        contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 140.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         item {
