@@ -1200,6 +1200,297 @@ class PlaybackLifecycleTest {
         exoPlayer.release()
     }
 
+    @OptIn(UnstableApi::class)
+    private fun buildSilentWav(durationMs: Int = 2000): ByteArray {
+        val sampleRate = 8000
+        val numSamples = (sampleRate * durationMs) / 1000
+        val dataSize = numSamples * 2
+        val totalSize = 36 + dataSize
+        val out = ByteArray(44 + dataSize)
+        fun writeIntLE(offset: Int, v: Int) {
+            out[offset] = (v and 0xff).toByte()
+            out[offset + 1] = ((v shr 8) and 0xff).toByte()
+            out[offset + 2] = ((v shr 16) and 0xff).toByte()
+            out[offset + 3] = ((v shr 24) and 0xff).toByte()
+        }
+        fun writeShortLE(offset: Int, v: Int) {
+            out[offset] = (v and 0xff).toByte()
+            out[offset + 1] = ((v shr 8) and 0xff).toByte()
+        }
+        "RIFF".toByteArray().copyInto(out, 0)
+        writeIntLE(4, totalSize)
+        "WAVEfmt ".toByteArray().copyInto(out, 8)
+        writeIntLE(16, 16)
+        writeShortLE(20, 1)
+        writeShortLE(22, 1)
+        writeIntLE(24, sampleRate)
+        writeIntLE(28, sampleRate * 2)
+        writeShortLE(32, 2)
+        writeShortLE(34, 16)
+        "data".toByteArray().copyInto(out, 36)
+        writeIntLE(40, dataSize)
+        return out
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun createRealMedia3Rig(
+        context: Context,
+        resolverDelayMs: (String) -> Long = { 30L },
+        streamForVideoId: (String) -> Result<ResolvedAudioStream> = { videoId ->
+            Result.success(fakeStream("https://cdn.example.com/$videoId/audio.wav").copy(mimeType = "audio/wav"))
+        }
+    ): Triple<PlaybackController, androidx.media3.exoplayer.ExoPlayer, () -> Unit> {
+        val wav5s = buildSilentWav(5000)
+        val wav0s = buildSilentWav(0)
+        val mockOkHttp = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val url = chain.request().url.toString()
+                when {
+                    url.contains("wav0") -> {
+                        Response.Builder()
+                            .request(chain.request())
+                            .protocol(Protocol.HTTP_1_1)
+                            .code(200)
+                            .message("OK")
+                            .header("Content-Type", "audio/wav")
+                            .header("Content-Length", wav0s.size.toString())
+                            .body(wav0s.toResponseBody("audio/wav".toMediaType()))
+                            .build()
+                    }
+                    else -> {
+                        Response.Builder()
+                            .request(chain.request())
+                            .protocol(Protocol.HTTP_1_1)
+                            .code(200)
+                            .message("OK")
+                            .header("Content-Type", "audio/wav")
+                            .header("Content-Length", wav5s.size.toString())
+                            .body(wav5s.toResponseBody("audio/wav".toMediaType()))
+                            .build()
+                    }
+                }
+            }
+            .build()
+
+        val ytClient = YouTubeMusicClient(
+            overrideOkHttpClient = mockOkHttp,
+            internalStageResolver = { videoId, _, _ ->
+                kotlinx.coroutines.delay(resolverDelayMs(videoId))
+                streamForVideoId(videoId)
+            }
+        )
+
+        val okHttpDsFactory = androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(mockOkHttp)
+        val upstreamFactory = DefaultDataSource.Factory(context, okHttpDsFactory)
+        val resolvingDsFactory = ResolvingDataSource.Factory(upstreamFactory) { spec ->
+            if (spec.uri.scheme == Track.YOUTUBE_URI_SCHEME) {
+                val vid = YouTubeMusicClient.extractVideoId(spec.uri.toString())!!
+                val stream = runBlocking { ytClient.resolveAudioStream(vid) }.getOrThrow()
+                spec.buildUpon().setUri(android.net.Uri.parse(stream.url)).build()
+            } else spec
+        }
+        val mediaSourceFactory = PulseMediaSourceFactory(
+            delegateFactory = DefaultMediaSourceFactory(resolvingDsFactory),
+            upstreamDataSourceFactory = upstreamFactory,
+            youtubeClient = ytClient,
+            appContext = null
+        )
+
+        val exoPlayer = androidx.media3.exoplayer.ExoPlayer.Builder(context)
+            .setMediaSourceFactory(mediaSourceFactory)
+            .build()
+        val session = androidx.media3.session.MediaSession.Builder(context, exoPlayer)
+            .setId("test_session_${System.nanoTime()}")
+            .build()
+        val future = androidx.media3.session.MediaController.Builder(context, session.token)
+            .setApplicationLooper(Looper.getMainLooper())
+            .buildAsync()
+        while (!future.isDone) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(5)
+        }
+        val mediaController = future.get()
+        val controller = PlaybackController(
+            context = context,
+            signalDao = NoOpSignalDao(),
+            youtubeClient = ytClient,
+            injectedPlayer = mediaController,
+            autoConnectController = false
+        )
+        val teardown: () -> Unit = {
+            controller.release()
+            mediaSourceFactory.release()
+            androidx.media3.session.MediaController.releaseFuture(future)
+            session.release()
+            exoPlayer.release()
+        }
+        return Triple(controller, exoPlayer, teardown)
+    }
+
+    private fun awaitCondition(timeoutMs: Long = 5_000L, condition: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (!condition() && System.currentTimeMillis() < deadline) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(10)
+        }
+        shadowOf(Looper.getMainLooper()).idle()
+    }
+
+    @OptIn(UnstableApi::class)
+    @Test
+    fun skipNext_youtubeQueue_advancesStrictlyOneTrackAndHandlesRapidClicks() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val (controller, exoPlayer, teardown) = createRealMedia3Rig(
+            context = context,
+            resolverDelayMs = { vid -> if (vid.contains("SLOW")) 350L else 30L }
+        )
+        try {
+            val queue = listOf(
+                Track(id = "yt_VID0000000A", title = "Song 0", artist = "A", sourceType = TrackSourceType.YOUTUBE),
+                Track(id = "yt_VID000SLOW1", title = "Slow 1", artist = "A", sourceType = TrackSourceType.YOUTUBE),
+                Track(id = "yt_VID0000000B", title = "Song 2", artist = "A", sourceType = TrackSourceType.YOUTUBE),
+                Track(id = "yt_VID0000000C", title = "Song 3", artist = "A", sourceType = TrackSourceType.YOUTUBE)
+            )
+            val transitions = CopyOnWriteArrayList<String>()
+            exoPlayer.addListener(object : Player.Listener {
+                override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                    mediaItem?.mediaId?.let { transitions.add(it) }
+                }
+            })
+
+            controller.playTrack(queue[0], queue)
+            awaitCondition {
+                exoPlayer.currentMediaItem?.mediaId == queue[0].id &&
+                    exoPlayer.playbackState == Player.STATE_READY
+            }
+            assertEquals(queue[0].id, controller.state.value.currentTrack?.id)
+
+            // Single click on Next advances strictly to track 1 without skipping ahead
+            controller.skipNext()
+            awaitCondition {
+                exoPlayer.currentMediaItem?.mediaId == queue[1].id &&
+                    exoPlayer.playbackState == Player.STATE_READY
+            }
+            assertEquals(queue[1].id, controller.state.value.currentTrack?.id)
+            assertEquals(1, controller.state.value.currentIndex)
+            assertNull(controller.state.value.playbackError)
+            assertFalse(transitions.contains(queue[2].id))
+
+            // Rapid double click advances 1 -> 2 -> 3 cleanly
+            controller.skipNext()
+            controller.skipNext()
+            awaitCondition {
+                exoPlayer.currentMediaItem?.mediaId == queue[3].id &&
+                    exoPlayer.playbackState == Player.STATE_READY
+            }
+            assertEquals(queue[3].id, controller.state.value.currentTrack?.id)
+            assertEquals(3, controller.state.value.currentIndex)
+            assertTrue(exoPlayer.playWhenReady)
+        } finally {
+            teardown()
+        }
+    }
+
+    @OptIn(UnstableApi::class)
+    @Test
+    fun skipNext_failingOrEmptyYouTubeTrack_surfacesErrorWithoutLooping() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val (controller, exoPlayer, teardown) = createRealMedia3Rig(
+            context = context,
+            streamForVideoId = { videoId ->
+                when {
+                    videoId.contains("FAILRESOLVE") ->
+                        Result.failure(java.io.IOException("Stream extraction failed"))
+                    else ->
+                        Result.success(fakeStream("https://cdn.example.com/$videoId/audio.wav").copy(mimeType = "audio/wav"))
+                }
+            }
+        )
+        try {
+            val queue = listOf(
+                Track(id = "yt_VID00000020", title = "Song 0", artist = "A", sourceType = TrackSourceType.YOUTUBE),
+                Track(id = "yt_FAILRESOLVE1", title = "FailResolve", artist = "A", sourceType = TrackSourceType.YOUTUBE),
+                Track(id = "yt_VID00000022", title = "Song 2", artist = "A", sourceType = TrackSourceType.YOUTUBE)
+            )
+            controller.playTrack(queue[0], queue)
+            awaitCondition {
+                exoPlayer.currentMediaItem?.mediaId == queue[0].id &&
+                    exoPlayer.playbackState == Player.STATE_READY
+            }
+
+            controller.skipNext()
+            awaitCondition { controller.state.value.playbackError != null }
+            assertEquals(queue[1].id, controller.state.value.currentTrack?.id)
+            assertEquals(1, controller.state.value.currentIndex)
+            assertFalse(controller.state.value.isBuffering)
+            assertFalse(controller.state.value.isPlaying)
+            assertNotNull(controller.state.value.playbackError)
+
+            // Skipping past the failed track plays track 2 normally
+            controller.skipNext()
+            awaitCondition {
+                exoPlayer.currentMediaItem?.mediaId == queue[2].id &&
+                    exoPlayer.playbackState == Player.STATE_READY
+            }
+            assertEquals(queue[2].id, controller.state.value.currentTrack?.id)
+            assertNull(controller.state.value.playbackError)
+            assertTrue(exoPlayer.playWhenReady)
+        } finally {
+            teardown()
+        }
+    }
+
+    @OptIn(UnstableApi::class)
+    @Test
+    fun resolvingYouTubeMediaSource_failedOrZeroDurationTrack_emitsPlayerErrorInsteadOfHanging() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val (_, exoPlayer, teardown) = createRealMedia3Rig(
+            context = context,
+            streamForVideoId = { videoId ->
+                when {
+                    videoId.contains("FAIL") -> Result.failure(java.io.IOException("Stream unavailable"))
+                    videoId.contains("WAV0") -> Result.success(fakeStream("https://cdn.example.com/$videoId/wav0.wav").copy(mimeType = "audio/wav"))
+                    else -> Result.success(fakeStream("https://cdn.example.com/$videoId/audio.wav").copy(mimeType = "audio/wav"))
+                }
+            }
+        )
+        try {
+            val errors = CopyOnWriteArrayList<String>()
+            exoPlayer.addListener(object : Player.Listener {
+                override fun onPlayerError(error: PlaybackException) {
+                    errors.add(error.errorCodeName)
+                }
+            })
+
+            val failingItem = PulseMediaItemMapper.toMediaItem(
+                Track(id = "yt_VIDFAIL0001", title = "Fail", artist = "A", sourceType = TrackSourceType.YOUTUBE)
+            )!!
+            val zeroDurItem = PulseMediaItemMapper.toMediaItem(
+                Track(id = "yt_VIDWAV00001", title = "Empty", artist = "A", sourceType = TrackSourceType.YOUTUBE)
+            )!!
+            val okItem = PulseMediaItemMapper.toMediaItem(
+                Track(id = "yt_VIDOK000001", title = "Good", artist = "A", sourceType = TrackSourceType.YOUTUBE)
+            )!!
+
+            exoPlayer.setMediaItems(listOf(failingItem, zeroDurItem, okItem), 0, 0L)
+            exoPlayer.prepare()
+            exoPlayer.play()
+
+            awaitCondition { errors.isNotEmpty() }
+            assertEquals(0, exoPlayer.currentMediaItemIndex)
+
+            errors.clear()
+            exoPlayer.seekTo(1, 0L)
+            exoPlayer.prepare()
+            exoPlayer.play()
+
+            awaitCondition { errors.isNotEmpty() }
+            assertEquals(1, exoPlayer.currentMediaItemIndex)
+        } finally {
+            teardown()
+        }
+    }
+
     private fun fakeStream(url: String): ResolvedAudioStream = ResolvedAudioStream(
         url = url,
         mimeType = "audio/mp4",

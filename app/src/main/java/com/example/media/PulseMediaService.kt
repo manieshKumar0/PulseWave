@@ -33,13 +33,20 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.audio.TeeAudioProcessor
+import androidx.media3.exoplayer.LoadingInfo
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.drm.DrmSessionManagerProvider
 import androidx.media3.exoplayer.hls.HlsMediaSource
+import androidx.media3.exoplayer.source.BaseMediaSource
 import androidx.media3.exoplayer.source.CompositeMediaSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaPeriod
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.exoplayer.source.SampleStream
+import androidx.media3.exoplayer.source.SinglePeriodTimeline
+import androidx.media3.exoplayer.source.TrackGroupArray
+import androidx.media3.exoplayer.trackselection.ExoTrackSelection
 import androidx.media3.exoplayer.upstream.Allocator
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import androidx.media3.session.DefaultMediaNotificationProvider
@@ -501,6 +508,7 @@ internal class PulseMediaSourceFactory(
             originalMediaItem = mediaItem,
             videoId = videoId,
             scope = scope,
+            peekCachedStream = peekCachedStream,
             streamResolver = streamResolver,
             childFactory = { resolved ->
                 youtubeClient.registerResolvedStreamHeaders(resolved)
@@ -541,6 +549,7 @@ internal class ResolvingYouTubeMediaSource(
     private val originalMediaItem: MediaItem,
     private val videoId: String,
     private val scope: CoroutineScope,
+    private val peekCachedStream: (String) -> ResolvedAudioStream? = { null },
     private val streamResolver: suspend (String) -> Result<ResolvedAudioStream>,
     private val childFactory: (ResolvedAudioStream) -> MediaSource
 ) : CompositeMediaSource<Void?>() {
@@ -557,13 +566,17 @@ internal class ResolvingYouTubeMediaSource(
     @Volatile
     private var resolutionError: IOException? = null
 
+    @Volatile
+    private var playbackHandler: Handler? = null
+
     internal fun preparedChildSourceForTest(): MediaSource? = childSource
 
     override fun getMediaItem(): MediaItem = currentMediaItem
 
     override fun canUpdateMediaItem(mediaItem: MediaItem): Boolean {
         return mediaItem.mediaId == currentMediaItem.mediaId &&
-            mediaItem.localConfiguration?.uri == currentMediaItem.localConfiguration?.uri
+            mediaItem.localConfiguration?.uri == currentMediaItem.localConfiguration?.uri &&
+            mediaItem.localConfiguration?.mimeType == currentMediaItem.localConfiguration?.mimeType
     }
 
     override fun updateMediaItem(mediaItem: MediaItem) {
@@ -587,7 +600,14 @@ internal class ResolvingYouTubeMediaSource(
         super.prepareSourceInternal(mediaTransferListener)
         released.set(false)
         resolutionError = null
-        val playbackHandler = Handler(Looper.myLooper() ?: Looper.getMainLooper())
+        val handler = Handler(Looper.myLooper() ?: Looper.getMainLooper())
+        playbackHandler = handler
+        peekCachedStream(videoId)?.let { cached ->
+            val created = childFactory(cached)
+            childSource = created
+            prepareChildSource(null, created)
+            return
+        }
         resolveJob = scope.launch {
             val result = try {
                 streamResolver(videoId)
@@ -596,7 +616,7 @@ internal class ResolvingYouTubeMediaSource(
             } catch (t: Throwable) {
                 Result.failure(t)
             }
-            playbackHandler.post {
+            handler.post {
                 if (released.get()) return@post
                 val stream = result.getOrNull()
                 if (stream != null) {
@@ -605,8 +625,12 @@ internal class ResolvingYouTubeMediaSource(
                     prepareChildSource(null, created)
                 } else {
                     val err = result.exceptionOrNull()
-                    resolutionError = (err as? IOException)
+                    val ioErr = (err as? IOException)
                         ?: IOException(err?.message ?: "YouTube audio stream unavailable", err)
+                    resolutionError = ioErr
+                    val failing = FailingChildMediaSource(currentMediaItem, ioErr)
+                    childSource = failing
+                    prepareChildSource(null, failing)
                 }
             }
         }
@@ -622,6 +646,22 @@ internal class ResolvingYouTubeMediaSource(
         mediaSource: MediaSource,
         newTimeline: Timeline
     ) {
+        if (mediaSource !is FailingChildMediaSource && !newTimeline.isEmpty) {
+            val window = newTimeline.getWindow(0, Timeline.Window())
+            if (window.durationUs == 0L) {
+                val emptyErr = IOException("Resolved YouTube audio stream has 0ms duration")
+                resolutionError = emptyErr
+                val handler = playbackHandler ?: Handler(Looper.myLooper() ?: Looper.getMainLooper())
+                handler.post {
+                    if (released.get() || childSource !== mediaSource) return@post
+                    releaseChildSource(null)
+                    val failing = FailingChildMediaSource(currentMediaItem, emptyErr)
+                    childSource = failing
+                    prepareChildSource(null, failing)
+                }
+                return
+            }
+        }
         refreshSourceInfo(newTimeline)
     }
 
@@ -643,6 +683,85 @@ internal class ResolvingYouTubeMediaSource(
         released.set(true)
         resolveJob?.cancel()
         resolveJob = null
+        playbackHandler = null
+        childSource = null
+        resolutionError = null
         super.releaseSourceInternal()
     }
+}
+
+@OptIn(UnstableApi::class)
+private class FailingChildMediaSource(
+    private val mediaItem: MediaItem,
+    private val error: IOException
+) : BaseMediaSource() {
+
+    override fun getMediaItem(): MediaItem = mediaItem
+
+    override fun prepareSourceInternal(mediaTransferListener: TransferListener?) {
+        refreshSourceInfo(
+            SinglePeriodTimeline(
+                C.TIME_UNSET,
+                /* isSeekable= */ false,
+                /* isDynamic= */ false,
+                /* useDynamicConfiguration= */ false,
+                /* manifest= */ null,
+                mediaItem
+            )
+        )
+    }
+
+    override fun maybeThrowSourceInfoRefreshError() {
+        // Defer throwing until createPeriod / maybeThrowPrepareError so pre-buffering a failing
+        // upcoming track does not interrupt the currently playing track.
+    }
+
+    override fun createPeriod(
+        id: MediaSource.MediaPeriodId,
+        allocator: Allocator,
+        startPositionUs: Long
+    ): MediaPeriod = FailingChildMediaPeriod(error)
+
+    override fun releasePeriod(mediaPeriod: MediaPeriod) = Unit
+
+    override fun releaseSourceInternal() = Unit
+}
+
+@OptIn(UnstableApi::class)
+private class FailingChildMediaPeriod(
+    private val error: IOException
+) : MediaPeriod {
+    override fun prepare(callback: MediaPeriod.Callback, positionUs: Long) = Unit
+
+    override fun maybeThrowPrepareError() {
+        throw error
+    }
+
+    override fun getTrackGroups(): TrackGroupArray = TrackGroupArray.EMPTY
+
+    override fun selectTracks(
+        selections: Array<out ExoTrackSelection?>,
+        mayRetainStreamFlags: BooleanArray,
+        streams: Array<out SampleStream?>,
+        streamResetFlags: BooleanArray,
+        positionUs: Long
+    ): Long = positionUs
+
+    override fun discardBuffer(positionUs: Long, toKeyframe: Boolean) = Unit
+
+    override fun readDiscontinuity(): Long = C.TIME_UNSET
+
+    override fun seekToUs(positionUs: Long): Long = positionUs
+
+    override fun getAdjustedSeekPositionUs(positionUs: Long, seekParameters: SeekParameters): Long = positionUs
+
+    override fun getBufferedPositionUs(): Long = 0L
+
+    override fun getNextLoadPositionUs(): Long = 0L
+
+    override fun continueLoading(loadingInfo: LoadingInfo): Boolean = false
+
+    override fun isLoading(): Boolean = false
+
+    override fun reevaluateBuffer(positionUs: Long) = Unit
 }
