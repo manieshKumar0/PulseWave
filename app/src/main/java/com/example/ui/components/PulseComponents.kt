@@ -7,6 +7,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -55,6 +57,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -189,8 +192,25 @@ fun ObsidianGlassCard(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val shape = RoundedCornerShape(cornerRadius)
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (onClick != null && isPressed) 0.985f else 1f,
+        animationSpec = spring(dampingRatio = 0.7f, stiffness = 620f),
+        label = "glass_card_press_scale"
+    )
     val baseModifier = if (onClick != null) {
-        modifier.clip(shape).clickable(onClick = onClick)
+        modifier
+            .graphicsLayer {
+                scaleX = pressScale
+                scaleY = pressScale
+            }
+            .clip(shape)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = ripple(bounded = true, color = accentTint),
+                onClick = onClick
+            )
     } else {
         modifier.clip(shape)
     }

@@ -1,11 +1,15 @@
 package com.example.ui.components
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,6 +35,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -50,6 +55,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
@@ -379,12 +385,23 @@ private fun DarkOrganicMoodCard(
     val shape = remember(slot.id) {
         OrganicSvgShape(slot.pathData, slot.refWidth, slot.refHeight)
     }
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (isPressed) 0.968f else 1f,
+        animationSpec = spring(dampingRatio = 0.65f, stiffness = 620f),
+        label = "mood_card_press_scale"
+    )
 
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .graphicsLayer {
+                scaleX = pressScale
+                scaleY = pressScale
+            }
             .clickable(
-                interactionSource = remember { MutableInteractionSource() },
+                interactionSource = interactionSource,
                 indication = null,
                 role = Role.Button,
                 onClickLabel = "Play ${mix.name}",
@@ -423,6 +440,7 @@ private fun DarkOrganicMoodCard(
             modifier = Modifier
                 .fillMaxSize()
                 .clip(shape)
+                .indication(interactionSource, ripple(bounded = true, color = Color.White))
         ) {
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val u = size.width / slot.refWidth

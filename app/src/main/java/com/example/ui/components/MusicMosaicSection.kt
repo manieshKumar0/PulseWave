@@ -1,7 +1,12 @@
 package com.example.ui.components
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.indication
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -9,8 +14,15 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material.ripple.RippleAlpha
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.LocalRippleConfiguration
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RippleConfiguration
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -21,6 +33,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
@@ -36,6 +49,13 @@ import com.example.data.model.Track
 import kotlin.math.roundToInt
 
 private val MosaicPalmInk = Color(0xE61B1030)
+
+private val MosaicTileRippleAlpha = RippleAlpha(
+    draggedAlpha = 0.16f,
+    focusedAlpha = 0.16f,
+    hoveredAlpha = 0.10f,
+    pressedAlpha = 0.26f
+)
 
 @Composable
 fun MusicMosaicDarkSection(
@@ -118,6 +138,7 @@ fun MusicMosaicDarkSection(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MosaicSongTile(
     spec: MosaicTileSpec,
@@ -132,10 +153,27 @@ private fun MosaicSongTile(
     val gradientStops = remember(spec.id) {
         if (spec.gradientColors.size >= 2) spec.gradientColors else listOf(Color(0xFF6E5198), Color(0xFF2B2045))
     }
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (isPressed) 0.968f else 1f,
+        animationSpec = spring(dampingRatio = 0.65f, stiffness = 620f),
+        label = "mosaic_tile_press_scale"
+    )
+    val rippleConfig = remember(spec.id) {
+        RippleConfiguration(
+            color = spec.glowColor,
+            rippleAlpha = MosaicTileRippleAlpha
+        )
+    }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .graphicsLayer {
+                scaleX = pressScale
+                scaleY = pressScale
+            }
             .clip(shape)
             .background(
                 Brush.linearGradient(
@@ -145,6 +183,8 @@ private fun MosaicSongTile(
                 )
             )
             .clickable(
+                interactionSource = interactionSource,
+                indication = null,
                 enabled = track != null,
                 role = Role.Button,
                 onClickLabel = track?.let { "Play ${it.title} by ${it.artist}" },
@@ -166,6 +206,13 @@ private fun MosaicSongTile(
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
+            )
+        }
+        CompositionLocalProvider(LocalRippleConfiguration provides rippleConfig) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .indication(interactionSource, ripple(bounded = true))
             )
         }
     }
