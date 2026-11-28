@@ -77,10 +77,10 @@ class LocalLibraryRepository(
         val now = System.currentTimeMillis()
         db.withTransaction {
             val existingById = trackDao.getAllTracksSnapshot().associateBy { it.id }
-            val merged = remoteTracks.map { remote ->
+            val merged = remoteTracks.mapIndexed { index, remote ->
                 val existing = existingById[remote.id]
                 if (existing == null) {
-                    TrackEntity.fromDomain(remote, now = now)
+                    TrackEntity.fromDomain(remote, now = (now - index).coerceAtLeast(1L))
                 } else {
                     val keepLocalSource = existing.sourceType == TrackSourceType.LOCAL_SAF.name ||
                         existing.sourceType == TrackSourceType.CLOUD_SAF.name
@@ -188,14 +188,25 @@ class LocalLibraryRepository(
         val now = System.currentTimeMillis()
         db.withTransaction {
             val existing = trackDao.getTrackById(track.id)
-            val base = mergePreservingLocalFields(track, existing, now)
-            val updated = base.copy(
-                playCount = (existing?.playCount ?: track.playCount) + 1,
-                lastPlayedAt = now,
-                cachedAt = now
-            )
-            trackDao.upsertTrack(updated)
-            updated.toDomain()
+            if (existing == null) {
+                val inserted = TrackEntity.fromDomain(track, now = 0L).copy(
+                    playCount = track.playCount + 1,
+                    lastPlayedAt = now,
+                    addedAt = 0L,
+                    cachedAt = now
+                )
+                trackDao.upsertTrack(inserted)
+                inserted.toDomain()
+            } else {
+                val updated = mergePreservingLocalFields(track, existing, now).copy(
+                    playCount = existing.playCount + 1,
+                    lastPlayedAt = now,
+                    addedAt = existing.addedAt,
+                    cachedAt = now
+                )
+                trackDao.upsertTrack(updated)
+                updated.toDomain()
+            }
         }
     }
 
@@ -203,10 +214,19 @@ class LocalLibraryRepository(
         val now = System.currentTimeMillis()
         db.withTransaction {
             val existing = trackDao.getTrackById(track.id)
-            val entity = mergePreservingLocalFields(track.copy(isLiked = liked), existing, now)
-                .copy(isLiked = liked)
-            trackDao.upsertTrack(entity)
-            entity.toDomain()
+            if (existing == null) {
+                val inserted = TrackEntity.fromDomain(track.copy(isLiked = liked), now = 0L).copy(
+                    isLiked = liked,
+                    addedAt = 0L,
+                    cachedAt = now
+                )
+                trackDao.upsertTrack(inserted)
+                inserted.toDomain()
+            } else {
+                val updated = existing.copy(isLiked = liked, cachedAt = now)
+                trackDao.upsertTrack(updated)
+                updated.toDomain()
+            }
         }
     }
 

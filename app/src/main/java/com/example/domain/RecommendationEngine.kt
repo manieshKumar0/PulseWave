@@ -184,10 +184,9 @@ class RecommendationEngine {
             val moodPromptBoost = if (!moodFilter.isNullOrBlank() &&
                 (track.mood.contains(moodFilter, true) || track.genre.contains(moodFilter, true) || track.title.contains(moodFilter, true))
             ) 5.5 else 0.0
-            val likeBoost = if (track.isLiked) 1.4 else 0.0
             val ytDiscoveryBoost = if (track.sourceType == TrackSourceType.YOUTUBE && skipPenalty == 0.0) 1.6 else 0.0
 
-            val total = (gScore + mScore + bpmFit + replayBonus + friendBoost + timeFit + moodPromptBoost + likeBoost + ytDiscoveryBoost - skipPenalty)
+            val total = (gScore + mScore + bpmFit + replayBonus + friendBoost + timeFit + moodPromptBoost + ytDiscoveryBoost - skipPenalty)
                 .coerceAtLeast(0.2)
 
             val (category, tag, reason) = when {

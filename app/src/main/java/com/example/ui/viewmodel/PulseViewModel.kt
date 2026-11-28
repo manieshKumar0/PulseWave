@@ -360,8 +360,8 @@ class PulseViewModel(
                     if (fetchedLive.isNotEmpty()) {
                         val roomById = roomSnapshot.associateBy { it.id }
                         val mergedLive = fetchedLive.map { mergeSavedFlags(it, roomById[it.id]) }
-                        _remoteCatalog.value = mergedLive
                         libraryRepo.cacheRemoteCatalog(mergedLive)
+                        _remoteCatalog.value = mergedLive
                     }
                 }
 
@@ -694,7 +694,7 @@ class PulseViewModel(
                         bpm = updated.bpm,
                         completionRatio = 1.0f,
                         earlySkip = false,
-                        replayCount = 1,
+                        replayCount = 0,
                         seekBackCount = 0,
                         dwellMs = 15_000L,
                         liked = true,

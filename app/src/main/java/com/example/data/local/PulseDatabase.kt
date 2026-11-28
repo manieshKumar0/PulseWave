@@ -136,7 +136,7 @@ data class ListeningSignalEntity(
 
 @Dao
 interface TrackDao {
-    @Query("SELECT * FROM tracks ORDER BY lastPlayedAt DESC, addedAt DESC")
+    @Query("SELECT * FROM tracks ORDER BY addedAt DESC, title COLLATE NOCASE ASC, id ASC")
     fun observeAllTracks(): Flow<List<TrackEntity>>
 
     @Query("SELECT * FROM tracks")
@@ -145,11 +145,11 @@ interface TrackDao {
     @Query(
         "SELECT * FROM tracks " +
             "WHERE isDownloaded = 1 OR sourceType = 'LOCAL_SAF' OR sourceType = 'CLOUD_SAF' " +
-            "ORDER BY lastPlayedAt DESC, addedAt DESC"
+            "ORDER BY addedAt DESC, title COLLATE NOCASE ASC, id ASC"
     )
     fun observeOfflinePlayableTracks(): Flow<List<TrackEntity>>
 
-    @Query("SELECT * FROM tracks WHERE isDownloaded = 1 ORDER BY addedAt DESC")
+    @Query("SELECT * FROM tracks WHERE isDownloaded = 1 ORDER BY addedAt DESC, title COLLATE NOCASE ASC, id ASC")
     fun observeDownloadedTracks(): Flow<List<TrackEntity>>
 
     @Query("SELECT * FROM tracks WHERE isDownloaded = 1")
@@ -164,7 +164,7 @@ interface TrackDao {
             "OR artist LIKE '%' || :query || '%' " +
             "OR album LIKE '%' || :query || '%' " +
             "OR genre LIKE '%' || :query || '%' " +
-            "ORDER BY isDownloaded DESC, lastPlayedAt DESC, addedAt DESC " +
+            "ORDER BY isDownloaded DESC, addedAt DESC, title COLLATE NOCASE ASC, id ASC " +
             "LIMIT 50"
     )
     suspend fun searchCachedTracks(query: String): List<TrackEntity>
