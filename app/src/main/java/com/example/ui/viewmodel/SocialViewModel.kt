@@ -313,6 +313,16 @@ class SocialViewModel(
         viewModelScope.launch { socialRepo.upvotePlaylistTrack(playlist, trackId) }
     }
 
+    fun removeTrackFromPlaylist(playlist: CollaborativePlaylistDoc, trackId: String) {
+        viewModelScope.launch {
+            val res = socialRepo.removeTrackFromCollaborativePlaylist(playlist, trackId)
+            _socialNotice.value = res.fold(
+                onSuccess = { "Removed track from ${playlist.title}" },
+                onFailure = { YouTubeMusicClient.humanReadableError(it, "Couldn't remove track right now.") }
+            )
+        }
+    }
+
     fun createAndJoinPulseRoom(roomName: String, moodTag: String, track: Track, soundscapePreset: String, onRoomCreated: (String) -> Unit) {
         viewModelScope.launch {
             val res = socialRepo.createPulseRoom(
@@ -399,6 +409,17 @@ class SocialViewModel(
         viewModelScope.launch {
             socialRepo.enqueueRoomTrack(roomId, _currentUserProfile.value.displayName, track)
             _socialNotice.value = "Queued ${track.title} in PulseRoom"
+        }
+    }
+
+    fun removeRoomQueueItem(roomId: String, queueItemId: String) {
+        viewModelScope.launch {
+            val res = socialRepo.removeRoomQueueItem(roomId, queueItemId)
+            res.onSuccess {
+                _socialNotice.value = "Removed track from PulseRoom queue"
+            }.onFailure {
+                _socialNotice.value = YouTubeMusicClient.humanReadableError(it, "Couldn't remove track from queue.")
+            }
         }
     }
 

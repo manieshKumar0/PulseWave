@@ -733,7 +733,8 @@ private fun AuthenticatedPulseApp(
                                                     if (isSignedIn) shareTargetTrack = track
                                                     else pendingSignInFeature = "sharing tracks"
                                                 },
-                                                onRecordDwell = { track, dwell -> pulseViewModel.recordFeedCardDwell(track, dwell) }
+                                                onRecordDwell = { track, dwell -> pulseViewModel.recordFeedCardDwell(track, dwell) },
+                                                onDismissDiscoveryTrack = { track -> pulseViewModel.dismissDiscoveryTrack(track) }
                                             )
 
                                             1 -> LibraryScreen(
@@ -772,7 +773,8 @@ private fun AuthenticatedPulseApp(
                                                     socialViewModel?.createPlaylist(title, desc, listOf(uid), seeds)
                                                 },
                                                 onAddActiveTrackToPlaylist = { pl, t -> socialViewModel?.addTrackToPlaylist(pl, t) },
-                                                onUpvotePlaylistTrack = { pl, tid -> socialViewModel?.upvotePlaylistTrack(pl, tid) }
+                                                onUpvotePlaylistTrack = { pl, tid -> socialViewModel?.upvotePlaylistTrack(pl, tid) },
+                                                onRemovePlaylistTrack = { pl, tid -> socialViewModel?.removeTrackFromPlaylist(pl, tid) }
                                             )
 
                                             2 -> if (!isSignedIn || socialViewModel == null) {
@@ -926,6 +928,7 @@ private fun AuthenticatedPulseApp(
                                     },
                                     onToggleHostPlayPause = { pulseViewModel.playbackController.togglePlayPause() },
                                     onEnqueueTrack = { track -> socialViewModel?.enqueueRoomTrack(route.roomId, track) },
+                                    onRemoveQueueItem = { item -> socialViewModel?.removeRoomQueueItem(route.roomId, item.id) },
                                     onSendReaction = { emoji -> socialViewModel?.sendRoomReaction(route.roomId, emoji) }
                                 )
                             }
@@ -1043,6 +1046,9 @@ private fun AuthenticatedPulseApp(
                     },
                     onPlayQueueTrack = { selected ->
                         pulseViewModel.playTrack(selected, nowPlayingState.queue.ifEmpty { listOf(selected) })
+                    },
+                    onRemoveQueueTrack = { idx ->
+                        pulseViewModel.playbackController.removeFromQueue(idx)
                     },
                     onStartSleepTimer = { mins -> pulseViewModel.startSleepTimer(mins) },
                     onCancelSleepTimer = { pulseViewModel.cancelSleepTimer() },

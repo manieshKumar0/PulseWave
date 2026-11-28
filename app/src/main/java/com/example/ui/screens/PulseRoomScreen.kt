@@ -57,6 +57,7 @@ import com.example.data.model.Track
 import com.example.media.PlaybackUiState
 import com.example.ui.components.BeatReactiveWaveformCanvas
 import com.example.ui.components.ObsidianGlassCard
+import com.example.ui.components.SwipeToDismissMusicCard
 import com.example.ui.components.TrackArtworkThumb
 import com.example.ui.components.VisualizerStyle
 import com.example.ui.theme.MintElectric
@@ -78,6 +79,7 @@ fun PulseRoomScreen(
     onHostBroadcastPlayback: (Track, Boolean, Long, String) -> Unit,
     onToggleHostPlayPause: () -> Unit,
     onEnqueueTrack: (Track) -> Unit,
+    onRemoveQueueItem: (RoomQueueItemDoc) -> Unit = {},
     onSendReaction: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -342,40 +344,53 @@ fun PulseRoomScreen(
             }
         } else {
             items(queue, key = { it.id }) { item ->
-                ObsidianGlassCard(modifier = Modifier.fillMaxWidth(), cornerRadius = 16.dp) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        TrackArtworkThumb(
-                            artworkUrl = item.artworkUrl,
-                            title = item.title,
-                            modifier = Modifier.size(48.dp)
-                        )
-                        Spacer(Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(item.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("Added by ${item.addedByName} · ${item.artist}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-                        }
-                        if (isHost) {
-                            IconButton(
-                                onClick = {
-                                    onHostBroadcastPlayback(
-                                        Track(
-                                            id = item.trackId,
-                                            title = item.title,
-                                            artist = item.artist,
-                                            artworkUrl = item.artworkUrl,
-                                            streamUrl = item.streamUrl
-                                        ),
-                                        true,
-                                        0L,
-                                        playbackState.activeSoundscape.name
-                                    )
-                                },
-                                modifier = Modifier.minimumInteractiveComponentSize()
-                            ) {
-                                Icon(Icons.Rounded.PlayArrow, contentDescription = "Play queued track for room", tint = MaterialTheme.colorScheme.primary)
+                val canRemove = isHost || item.addedByUid == currentUserId
+                SwipeToDismissMusicCard(
+                    itemKey = item.id,
+                    enabled = canRemove,
+                    cornerRadius = 16.dp,
+                    dismissLabel = "Remove",
+                    onDismiss = { onRemoveQueueItem(item) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .animateItem()
+                        .testTag("room_queue_swipe_${item.id}")
+                ) {
+                    ObsidianGlassCard(modifier = Modifier.fillMaxWidth(), cornerRadius = 16.dp) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            TrackArtworkThumb(
+                                artworkUrl = item.artworkUrl,
+                                title = item.title,
+                                modifier = Modifier.size(48.dp)
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(item.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("Added by ${item.addedByName} · ${item.artist}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                            }
+                            if (isHost) {
+                                IconButton(
+                                    onClick = {
+                                        onHostBroadcastPlayback(
+                                            Track(
+                                                id = item.trackId,
+                                                title = item.title,
+                                                artist = item.artist,
+                                                artworkUrl = item.artworkUrl,
+                                                streamUrl = item.streamUrl
+                                            ),
+                                            true,
+                                            0L,
+                                            playbackState.activeSoundscape.name
+                                        )
+                                    },
+                                    modifier = Modifier.minimumInteractiveComponentSize()
+                                ) {
+                                    Icon(Icons.Rounded.PlayArrow, contentDescription = "Play queued track for room", tint = MaterialTheme.colorScheme.primary)
+                                }
                             }
                         }
                     }

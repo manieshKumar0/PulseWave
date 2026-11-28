@@ -150,6 +150,7 @@ import com.example.ui.components.NeonSkylineBackgroundOverlay
 import com.example.ui.components.ObsidianGlassCard
 import com.example.ui.components.PulseRoomStatusBadge
 import com.example.ui.components.PulseWaveBrandLogo
+import com.example.ui.components.SwipeToDismissMusicCard
 import com.example.ui.components.SyncedLyricsDisplay
 import com.example.ui.components.TrackArtworkThumb
 import com.example.ui.components.VisualizerRenderConfig
@@ -203,6 +204,7 @@ fun NowPlayingScreen(
     onGenerateAiStory: (Track) -> Unit,
     onAddLyricNote: (Track, Long, String) -> Unit,
     onPlayQueueTrack: (Track) -> Unit = {},
+    onRemoveQueueTrack: (Int) -> Unit = {},
     onStartSleepTimer: (Int) -> Unit = {},
     onCancelSleepTimer: () -> Unit = {},
     onToggleEqEnabled: (Boolean) -> Unit = {},
@@ -599,6 +601,7 @@ fun NowPlayingScreen(
                 showQueueSheet = false
                 onPlayQueueTrack(queuedTrack)
             },
+            onRemoveTrack = onRemoveQueueTrack,
             onDismiss = { showQueueSheet = false }
         )
     }
@@ -1539,9 +1542,18 @@ private fun UpNextQueueSheet(
     activeTrackId: String,
     glowPrimary: Color,
     onSelectTrack: (Track) -> Unit,
+    onRemoveTrack: (Int) -> Unit,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val keyedQueue = remember(queue) {
+        val seenCounts = mutableMapOf<String, Int>()
+        queue.mapIndexed { idx, item ->
+            val occurrence = seenCounts[item.id] ?: 0
+            seenCounts[item.id] = occurrence + 1
+            Triple(idx, "${item.id}_$occurrence", item)
+        }
+    }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -1565,7 +1577,11 @@ private fun UpNextQueueSheet(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "${queue.size} track${if (queue.size == 1) "" else "s"} in queue",
+                        text = if (queue.isEmpty()) {
+                            "0 tracks in queue"
+                        } else {
+                            "${queue.size} track${if (queue.size == 1) "" else "s"} in queue · Swipe to remove"
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1593,54 +1609,65 @@ private fun UpNextQueueSheet(
                     contentPadding = PaddingValues(bottom = 18.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    itemsIndexed(queue, key = { idx, item -> "${idx}_${item.id}" }) { _, queued ->
+                    items(keyedQueue, key = { it.second }) { (idx, itemKey, queued) ->
                         val isActive = queued.id == activeTrackId
-                        Surface(
-                            shape = RoundedCornerShape(14.dp),
-                            color = if (isActive) glowPrimary.copy(alpha = 0.16f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                        SwipeToDismissMusicCard(
+                            itemKey = itemKey,
+                            cornerRadius = 14.dp,
+                            dismissLabel = "Remove",
+                            onDismiss = { onRemoveTrack(idx) },
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(14.dp))
-                                .clickable { onSelectTrack(queued) }
-                                .minimumInteractiveComponentSize()
+                                .animateItem()
+                                .testTag("queue_item_swipe_${queued.id}")
                         ) {
-                            Row(
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = if (isActive) glowPrimary.copy(alpha = 0.16f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.86f),
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .clickable { onSelectTrack(queued) }
+                                    .minimumInteractiveComponentSize()
                             ) {
-                                TrackArtworkThumb(
-                                    artworkUrl = queued.displayArtworkUri,
-                                    title = queued.title,
-                                    modifier = Modifier.size(44.dp),
-                                    cornerRadius = 10.dp
-                                )
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = queued.title,
-                                        style = MaterialTheme.typography.titleSmall,
-                                        color = if (isActive) glowPrimary else MaterialTheme.colorScheme.onSurface,
-                                        fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    TrackArtworkThumb(
+                                        artworkUrl = queued.displayArtworkUri,
+                                        title = queued.title,
+                                        modifier = Modifier.size(44.dp),
+                                        cornerRadius = 10.dp
                                     )
-                                    Text(
-                                        text = queued.artist,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                if (isActive) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.GraphicEq,
-                                        contentDescription = "Now playing",
-                                        tint = glowPrimary,
-                                        modifier = Modifier.size(20.dp)
-                                    )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = queued.title,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            color = if (isActive) glowPrimary else MaterialTheme.colorScheme.onSurface,
+                                            fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = queued.artist,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    if (isActive) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.GraphicEq,
+                                            contentDescription = "Now playing",
+                                            tint = glowPrimary,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
                                 }
                             }
                         }

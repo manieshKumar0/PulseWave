@@ -111,6 +111,7 @@ import com.example.domain.SafMusicImporter
 import com.example.ui.components.GoogleSignInGateCard
 import com.example.ui.components.ObsidianGlassCard
 import com.example.ui.components.PulseScreenHeader
+import com.example.ui.components.SwipeToDismissMusicCard
 import com.example.ui.components.TrackRowItem
 import com.example.ui.theme.UltravioletPulse
 import com.example.ui.viewmodel.UiState
@@ -146,6 +147,7 @@ fun LibraryScreen(
     onCreatePlaylist: (String, String, List<Track>) -> Unit,
     onAddActiveTrackToPlaylist: (CollaborativePlaylistDoc, Track) -> Unit,
     onUpvotePlaylistTrack: (CollaborativePlaylistDoc, String) -> Unit,
+    onRemovePlaylistTrack: (CollaborativePlaylistDoc, String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -414,7 +416,8 @@ fun LibraryScreen(
                                 onAddActiveTrack = {
                                     if (activeTrack != null) onAddActiveTrackToPlaylist(playlist, activeTrack)
                                 },
-                                onUpvoteTrack = { tid -> onUpvotePlaylistTrack(playlist, tid) }
+                                onUpvoteTrack = { tid -> onUpvotePlaylistTrack(playlist, tid) },
+                                onRemoveTrack = { tid -> onRemovePlaylistTrack(playlist, tid) }
                             )
                         }
                     }
@@ -818,7 +821,8 @@ private fun CollaborativePlaylistCard(
     activeTrack: Track?,
     onPlayPlaylistTrack: (com.example.data.model.PlaylistTrackItemMap) -> Unit,
     onAddActiveTrack: () -> Unit,
-    onUpvoteTrack: (String) -> Unit
+    onUpvoteTrack: (String) -> Unit,
+    onRemoveTrack: (String) -> Unit
 ) {
     val parsed = remember(playlist.trackItems) {
         playlist.parsedTracks().sortedByDescending { it.upvotes }
@@ -868,53 +872,64 @@ private fun CollaborativePlaylistCard(
             }
 
             parsed.take(8).forEach { item ->
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
-                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                    shape = RoundedCornerShape(14.dp)
+                SwipeToDismissMusicCard(
+                    itemKey = "${playlist.id}_${item.trackId}",
+                    cornerRadius = 14.dp,
+                    dismissLabel = "Remove",
+                    onDismiss = { onRemoveTrack(item.trackId) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("collab_track_swipe_${item.trackId}")
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.86f),
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        IconButton(
-                            onClick = { onPlayPlaylistTrack(item) },
-                            modifier = Modifier.minimumInteractiveComponentSize()
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                imageVector = Icons.Rounded.PlayArrow,
-                                contentDescription = "Play ${item.title}",
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = item.title,
-                                style = MaterialTheme.typography.titleMedium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = item.artist,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        TextButton(
-                            onClick = { onUpvoteTrack(item.trackId) },
-                            modifier = Modifier.minimumInteractiveComponentSize()
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.ThumbUp,
-                                contentDescription = "Upvote ${item.title}",
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text("${item.upvotes}")
+                            IconButton(
+                                onClick = { onPlayPlaylistTrack(item) },
+                                modifier = Modifier.minimumInteractiveComponentSize()
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.PlayArrow,
+                                    contentDescription = "Play ${item.title}",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = item.title,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = item.artist,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            TextButton(
+                                onClick = { onUpvoteTrack(item.trackId) },
+                                modifier = Modifier.minimumInteractiveComponentSize()
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.ThumbUp,
+                                    contentDescription = "Upvote ${item.title}",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text("${item.upvotes}")
+                            }
                         }
                     }
                 }

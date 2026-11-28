@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.BorderStroke
@@ -31,6 +32,7 @@ import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CloudDone
+import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.DownloadDone
 import androidx.compose.material.icons.rounded.Favorite
@@ -54,16 +56,22 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -921,10 +929,142 @@ fun GoogleSignInRequiredDialog(
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SwipeToDismissMusicCard(
+    itemKey: Any,
+    enabled: Boolean = true,
+    cornerRadius: Dp = 18.dp,
+    dismissLabel: String = "Remove",
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    if (!enabled) {
+        Box(modifier = modifier) {
+            content()
+        }
+        return
+    }
+
+    val haptics = LocalHapticFeedback.current
+    val latestOnDismiss by rememberUpdatedState(onDismiss)
+
+    key(itemKey) {
+        var dismissTriggered by remember { mutableStateOf(false) }
+        val dismissState = rememberSwipeToDismissBoxState(
+            confirmValueChange = { value ->
+                if ((value == SwipeToDismissBoxValue.StartToEnd ||
+                        value == SwipeToDismissBoxValue.EndToStart) && !dismissTriggered
+                ) {
+                    dismissTriggered = true
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    latestOnDismiss()
+                    true
+                } else {
+                    false
+                }
+            },
+            positionalThreshold = { totalDistance -> totalDistance * 0.35f }
+        )
+
+        LaunchedEffect(dismissTriggered) {
+            if (dismissTriggered) {
+                delay(700L)
+                dismissTriggered = false
+                dismissState.reset()
+            }
+        }
+
+        SwipeToDismissBox(
+            state = dismissState,
+            modifier = modifier.clip(RoundedCornerShape(cornerRadius)),
+            enableDismissFromStartToEnd = true,
+            enableDismissFromEndToStart = true,
+            backgroundContent = {
+                val direction = dismissState.dismissDirection
+                val isActiveSwipe = dismissState.targetValue != SwipeToDismissBoxValue.Settled ||
+                    direction != SwipeToDismissBoxValue.Settled
+                val bgColor by animateColorAsState(
+                    targetValue = when {
+                        dismissState.targetValue != SwipeToDismissBoxValue.Settled ->
+                            MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.92f)
+                        isActiveSwipe ->
+                            MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.45f)
+                        else -> Color.Transparent
+                    },
+                    label = "swipe_dismiss_bg_color"
+                )
+                val iconScale by animateFloatAsState(
+                    targetValue = if (dismissState.targetValue != SwipeToDismissBoxValue.Settled) 1.15f else 0.9f,
+                    animationSpec = spring(dampingRatio = 0.6f, stiffness = 500f),
+                    label = "swipe_dismiss_icon_scale"
+                )
+                val alignment = when (direction) {
+                    SwipeToDismissBoxValue.StartToEnd -> Alignment.CenterStart
+                    else -> Alignment.CenterEnd
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(cornerRadius))
+                        .background(bgColor)
+                        .padding(horizontal = 20.dp),
+                    contentAlignment = alignment
+                ) {
+                    if (isActiveSwipe) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            if (direction == SwipeToDismissBoxValue.StartToEnd) {
+                                Icon(
+                                    imageVector = Icons.Rounded.DeleteOutline,
+                                    contentDescription = dismissLabel,
+                                    tint = MaterialTheme.colorScheme.onErrorContainer,
+                                    modifier = Modifier.graphicsLayer {
+                                        scaleX = iconScale
+                                        scaleY = iconScale
+                                    }
+                                )
+                                Text(
+                                    text = dismissLabel,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                            } else {
+                                Text(
+                                    text = dismissLabel,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                                Icon(
+                                    imageVector = Icons.Rounded.DeleteOutline,
+                                    contentDescription = dismissLabel,
+                                    tint = MaterialTheme.colorScheme.onErrorContainer,
+                                    modifier = Modifier.graphicsLayer {
+                                        scaleX = iconScale
+                                        scaleY = iconScale
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            content = { content() }
+        )
+    }
+}
+
 fun formatMillis(ms: Long): String {
     val totalSec = (ms / 1000L).coerceAtLeast(0L)
     val min = totalSec / 60L
     val sec = totalSec % 60L
     return "%d:%02d".format(min, sec)
 }
+
 

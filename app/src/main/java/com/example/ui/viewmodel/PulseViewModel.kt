@@ -785,6 +785,23 @@ class PulseViewModel(
         playbackController.updateTrackMetadata(updated)
     }
 
+    fun dismissDiscoveryTrack(track: Track) {
+        _discoveryState.update { state ->
+            if (state is UiState.Success) {
+                val bundle = state.data
+                state.copy(
+                    data = bundle.copy(
+                        explorePicks = bundle.explorePicks.filterNot { it.track.id == track.id },
+                        youtubeLikedRecs = bundle.youtubeLikedRecs.filterNot { it.id == track.id }
+                    )
+                )
+            } else {
+                state
+            }
+        }
+        _statusMessage.value = "Removed ${track.title} from Deep Discovery Queue"
+    }
+
     fun importSafAudio(uris: List<Uri>, isCloudProvider: Boolean) {
         if (uris.isEmpty()) return
         viewModelScope.launch {

@@ -1568,6 +1568,78 @@ class PlaybackController internal constructor(
         }
     }
 
+    fun removeFromQueue(index: Int) {
+        runOnPlayerThread {
+            val currentState = _state.value
+            val currentQueue = currentState.queue
+            if (index !in currentQueue.indices) return@runOnPlayerThread
+
+            val updatedQueue = currentQueue.toMutableList().apply { removeAt(index) }
+            val removingActive = index == currentState.currentIndex ||
+                (currentState.currentIndex !in currentQueue.indices &&
+                    currentState.currentTrack?.id == currentQueue[index].id)
+            val controller = mediaController
+
+            if (updatedQueue.isEmpty()) {
+                playRequestGeneration.incrementAndGet()
+                resolvePlayJob?.cancel()
+                resolvePlayJob = null
+                isResolvingRemoteTrack = false
+                awaitingMedia3TrackId = null
+                replacingActiveTrackId = null
+                pendingPlayRequest = null
+                lastTrackId = null
+                controller?.pause()
+                controller?.stop()
+                controller?.clearMediaItems()
+                _state.update {
+                    it.copy(
+                        currentTrack = null,
+                        queue = emptyList(),
+                        currentIndex = -1,
+                        isPlaying = false,
+                        isBuffering = false,
+                        positionMs = 0L,
+                        durationMs = 0L,
+                        playbackError = null
+                    )
+                }
+                return@runOnPlayerThread
+            }
+
+            if (removingActive) {
+                val nextIdx = index.coerceAtMost(updatedQueue.lastIndex)
+                val nextTrack = updatedQueue[nextIdx]
+                playTrack(nextTrack, updatedQueue)
+            } else {
+                val newCurrentIndex = if (index < currentState.currentIndex) {
+                    (currentState.currentIndex - 1).coerceAtLeast(0)
+                } else {
+                    currentState.currentIndex
+                }
+                if (controller != null && index in 0 until controller.mediaItemCount) {
+                    if (controller.mediaItemCount == currentQueue.size) {
+                        controller.removeMediaItem(index)
+                    } else if (controller.mediaItemCount > 1) {
+                        val mappedId = currentQueue[index].id
+                        val mediaIdx = (0 until controller.mediaItemCount).firstOrNull {
+                            controller.getMediaItemAt(it).mediaId == mappedId
+                        }
+                        if (mediaIdx != null && mediaIdx != controller.currentMediaItemIndex) {
+                            controller.removeMediaItem(mediaIdx)
+                        }
+                    }
+                }
+                _state.update {
+                    it.copy(
+                        queue = updatedQueue,
+                        currentIndex = newCurrentIndex
+                    )
+                }
+            }
+        }
+    }
+
     fun toggleShuffle() {
         runOnPlayerThread {
             val controller = mediaController ?: return@runOnPlayerThread

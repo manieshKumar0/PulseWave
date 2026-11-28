@@ -655,6 +655,31 @@ class SocialRepository(
         }
     }
 
+    suspend fun removeTrackFromCollaborativePlaylist(
+        playlist: CollaborativePlaylistDoc,
+        trackId: String
+    ): Result<Unit> {
+        requireUserId()
+        val path = "playlists/${playlist.id}"
+        return try {
+            val updated = playlist.trackItems.filterNot { it["trackId"] == trackId }
+            if (updated.size != playlist.trackItems.size) {
+                db.collection("playlists").document(playlist.id).update(
+                    mapOf(
+                        "trackItems" to updated,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ).await()
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
     // --- 7. Live Co-Listening PulseRooms ---
 
     fun observeActivePulseRooms(): Flow<List<PulseRoomDoc>> = flow {
@@ -889,6 +914,20 @@ class SocialRepository(
             throw e
         } catch (e: Exception) {
             handleFirestoreError(e, OperationType.CREATE, ref.path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun removeRoomQueueItem(roomId: String, queueItemId: String): Result<Unit> {
+        requireUserId()
+        val ref = db.collection("pulseRooms").document(roomId).collection("queue").document(queueItemId)
+        return try {
+            ref.delete().await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, ref.path)
             Result.failure(e)
         }
     }

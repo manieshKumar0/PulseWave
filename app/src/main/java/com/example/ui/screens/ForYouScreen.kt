@@ -57,6 +57,7 @@ import com.example.ui.components.MosaicTileSpecs
 import com.example.ui.components.MusicMosaicDarkSection
 import com.example.ui.components.ObsidianGlassCard
 import com.example.ui.components.PulseScreenHeader
+import com.example.ui.components.SwipeToDismissMusicCard
 import com.example.ui.components.TrackArtworkThumb
 import com.example.ui.components.TrackRowItem
 import com.example.ui.theme.MintElectric
@@ -78,6 +79,7 @@ fun ForYouScreen(
     onDownloadClick: (Track) -> Unit,
     onShareClick: (Track) -> Unit,
     onRecordDwell: (Track, Long) -> Unit,
+    onDismissDiscoveryTrack: (Track) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     LazyColumn(
@@ -287,15 +289,26 @@ fun ForYouScreen(
                             Text("Deep Discovery Queue", style = MaterialTheme.typography.titleLarge)
                         }
                         items(bundle.explorePicks, key = { "explore_${it.track.id}" }) { pick ->
-                            TrackRowItem(
-                                track = pick.track,
-                                isActive = pick.track.id == activeTrackId,
-                                downloadProgress = downloadProgress[pick.track.id],
-                                onPlay = { onPlayTrack(pick.track, allQueue) },
-                                onToggleLike = { onToggleLike(pick.track) },
-                                onDownloadClick = { onDownloadClick(pick.track) },
-                                onShareClick = { onShareClick(pick.track) }
-                            )
+                            SwipeToDismissMusicCard(
+                                itemKey = "explore_${pick.track.id}",
+                                cornerRadius = 18.dp,
+                                dismissLabel = "Remove",
+                                onDismiss = { onDismissDiscoveryTrack(pick.track) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .animateItem()
+                                    .testTag("discovery_swipe_${pick.track.id}")
+                            ) {
+                                TrackRowItem(
+                                    track = pick.track,
+                                    isActive = pick.track.id == activeTrackId,
+                                    downloadProgress = downloadProgress[pick.track.id],
+                                    onPlay = { onPlayTrack(pick.track, allQueue) },
+                                    onToggleLike = { onToggleLike(pick.track) },
+                                    onDownloadClick = { onDownloadClick(pick.track) },
+                                    onShareClick = { onShareClick(pick.track) }
+                                )
+                            }
                         }
                     }
                 }
